@@ -2537,6 +2537,10 @@ CinnamonNetworkApplet.prototype = {
         if (shown)
             this.set_applet_tooltip(lines.join("\n"));
 
+        /* Keep the TextIconApplet's own label hidden: it is empty, but while
+           shown it still takes the applet box's spacing, which left a gap
+           after the last icon.  An empty text hides it. */
+        this.set_applet_label("");
 
         /* Keep the drawn bars honest between timer ticks. */
         this._watchSignal(watchAp);
