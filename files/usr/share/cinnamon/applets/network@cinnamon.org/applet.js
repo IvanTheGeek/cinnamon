@@ -94,6 +94,20 @@ function signalToIcon(value) {
     return 'none';
 }
 
+/* '-secure' when the access point is encrypted, '' when it is open.
+   _getApSecurityType() lives on NMDeviceWireless and caches its answer on the
+   access point, so pass the device wrapper when there is one. */
+function apSecuritySuffix(dev, ap) {
+    if (!ap)
+        return '';
+
+    let type = (dev && dev._getApSecurityType) ? dev._getApSecurityType(ap)
+                                               : ap._secType;
+
+    return (type != NMAccessPointSecurity.UNKNOWN &&
+            type != NMAccessPointSecurity.NONE) ? '-secure' : '';
+}
+
 // shared between NMNetworkMenuItem and NMDeviceWireless
 function sortAccessPoints(accessPoints) {
     return accessPoints.sort(function (one, two) {
@@ -2455,7 +2469,7 @@ CinnamonNetworkApplet.prototype = {
                                 this._setIcon('xsi-network-wireless-no-route');
                                 this._setTooltip(_("Wireless connection") + ": " + ssidToLabel(ap.get_ssid()) + " " + _("(Limited connectivity)"));
                             } else {
-                                this._setIcon('xsi-network-wireless-signal-' + signalToIcon(ap.strength));
+                                this._setIcon('xsi-network-wireless-signal-' + signalToIcon(ap.strength) + apSecuritySuffix(dev, ap));
                                 this._setTooltip(_("Wireless connection") + ": " + ssidToLabel(ap.get_ssid()) + " ("+ ap.strength +"%)");
                             }
                         }
