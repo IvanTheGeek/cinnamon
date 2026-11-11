@@ -142,6 +142,13 @@ function primaryLineStyle(color) {
     return 'padding-bottom: 2px; border: 0 solid ' + color + '; border-top-width: 2px;';
 }
 
+/* The tunnel glyph, a padlock over a network node, fills much less of its
+   box than the bars or the wired glyph, so at the panel's symbolic icon size
+   it looks smaller than its neighbours; at the theme's .applet-icon size
+   (22px) it was a little too big.  Draw it at this multiple of the panel's
+   symbolic icon size instead (Ivan, 2026-11-11). */
+const VPN_ICON_SCALE = 1.25;
+
 /* The kinds of link that get a panel icon of their own, in panel order. */
 const LINK_ICON_KINDS = [ NMConnectionCategory.WIRED,
                           NMConnectionCategory.WIRELESS,
@@ -2394,9 +2401,10 @@ CinnamonNetworkApplet.prototype = {
             return;
 
         for (let kind in this._linkIcons) {
+            let want = (kind === NMConnectionCategory.VPN) ? Math.round(size * VPN_ICON_SCALE) : size;
             let icon = this._linkIcons[kind].icon;
-            if (icon.icon_size !== size)
-                icon.set_icon_size(size);
+            if (icon.icon_size !== want)
+                icon.set_icon_size(want);
         }
     },
 
