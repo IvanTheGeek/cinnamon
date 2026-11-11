@@ -1801,10 +1801,10 @@ function CinnamonNetworkApplet(metadata, orientation, panel_height, instance_id)
 }
 
 CinnamonNetworkApplet.prototype = {
-    __proto__: Applet.IconApplet.prototype,
+    __proto__: Applet.TextIconApplet.prototype,
 
     _init: function(metadata, orientation, panel_height, instance_id) {
-        Applet.IconApplet.prototype._init.call(this, orientation, panel_height, instance_id);
+        Applet.TextIconApplet.prototype._init.call(this, orientation, panel_height, instance_id);
 
         try {
             this.metadata = metadata;
@@ -1817,6 +1817,23 @@ CinnamonNetworkApplet.prototype = {
 
             this._currentIconName = undefined;
             this._setIcon('xsi-network-offline');
+
+            /* Dedicated tunnel indicator, sitting beside the link glyph rather
+               than on top of it, so "encrypted AP" and "VPN up" never share a
+               symbol. Hidden unless a tunnel is actually up. */
+            this._vpnIcon = new St.Icon({ icon_name: 'xsi-network-vpn',
+                                          icon_type: St.IconType.SYMBOLIC,
+                                          style_class: 'applet-icon' });
+            this._vpnIconBin = new St.Bin();
+            this._vpnIconBin.set_child(this._vpnIcon);
+            this.actor.add(this._vpnIconBin, { y_align: St.Align.MIDDLE, y_fill: false });
+            try {
+                /* Prefer [link][vpn][count]; if the ordering call is
+                   unavailable the appended position is still fine. */
+                this.actor.set_child_below_sibling(this._vpnIconBin, this._layoutBin);
+            } catch (e) {
+            }
+            this._vpnIconBin.hide();
 
             this.settings = new Settings.AppletSettings(this, metadata.uuid, this.instance_id);
             this.settings.bind("keyOpen", "keyOpen", this._setKeybinding);
@@ -1964,6 +1981,12 @@ CinnamonNetworkApplet.prototype = {
             this.set_applet_icon_symbolic_name(name);
             this._currentIconName = name;
         }
+    },
+
+    /* Remembers the physical-link tooltip so tunnel names can be appended. */
+    _setTooltip: function(text) {
+        this._baseTooltip = text;
+        this.set_applet_tooltip(text);
     },
 
     on_applet_clicked: function(event) {
@@ -2379,35 +2402,35 @@ CinnamonNetworkApplet.prototype = {
                     // /etc/network/interfaces): there is no active connection
                     // to describe, but we are not offline either.
                     this._setIcon('xsi-network-wired');
-                    this.set_applet_tooltip(_("Connected to the network") + " (" + _("unmanaged") + ")");
+                    this._setTooltip(_("Connected to the network") + " (" + _("unmanaged") + ")");
                 } else {
                     this._setIcon('xsi-network-offline');
-                    this.set_applet_tooltip(_("No connection"));
+                    this._setTooltip(_("No connection"));
                 }
             } else if (mc.state == NM.ActiveConnectionState.ACTIVATING) {
                 new_delay = FAST_PERIODIC_UPDATE_FREQUENCY_SECONDS;
                 switch (mc._section) {
                 case NMConnectionCategory.WWAN:
                     this._setIcon('xsi-network-cellular-acquiring');
-                    this.set_applet_tooltip(_("Connecting to the cellular network..."));
+                    this._setTooltip(_("Connecting to the cellular network..."));
                     break;
                 case NMConnectionCategory.WIRELESS:
                     this._setIcon('xsi-network-wireless-acquiring');
-                    this.set_applet_tooltip(_("Connecting to the wireless network..."));
+                    this._setTooltip(_("Connecting to the wireless network..."));
                     break;
                 case NMConnectionCategory.WIRED:
                     this._setIcon('xsi-network-wired-acquiring');
-                    this.set_applet_tooltip(_("Connecting to the wired network..."));
+                    this._setTooltip(_("Connecting to the wired network..."));
                     break;
                 case NMConnectionCategory.VPN:
                     this._setIcon('xsi-network-vpn-acquiring');
-                    this.set_applet_tooltip(_("Connecting to the VPN..."));
+                    this._setTooltip(_("Connecting to the VPN..."));
                     break;
                 default:
                     // fallback to a generic connected icon
                     // (it could be a private connection of some other user)
                     this._setIcon('xsi-network-wired-acquiring');
-                    this.set_applet_tooltip(_("Connecting to the network..."));
+                    this._setTooltip(_("Connecting to the network..."));
                 }
             } else {
                 let dev;
@@ -2426,14 +2449,14 @@ CinnamonNetworkApplet.prototype = {
                                 break;
                             }
                             this._setIcon('xsi-network-wireless-connected');
-                            this.set_applet_tooltip(_("Connected to the wireless network"));
+                            this._setTooltip(_("Connected to the wireless network"));
                         } else {
                             if (limited_conn) {
                                 this._setIcon('xsi-network-wireless-no-route');
-                                this.set_applet_tooltip(_("Wireless connection") + ": " + ssidToLabel(ap.get_ssid()) + " " + _("(Limited connectivity)"));
+                                this._setTooltip(_("Wireless connection") + ": " + ssidToLabel(ap.get_ssid()) + " " + _("(Limited connectivity)"));
                             } else {
                                 this._setIcon('xsi-network-wireless-signal-' + signalToIcon(ap.strength));
-                                this.set_applet_tooltip(_("Wireless connection") + ": " + ssidToLabel(ap.get_ssid()) + " ("+ ap.strength +"%)");
+                                this._setTooltip(_("Wireless connection") + ": " + ssidToLabel(ap.get_ssid()) + " ("+ ap.strength +"%)");
                             }
                         }
                     } else {
@@ -2443,11 +2466,11 @@ CinnamonNetworkApplet.prototype = {
                 case NMConnectionCategory.WIRED:
                     if (limited_conn) {
                         this._setIcon('xsi-network-wired-no-route');
-                        this.set_applet_tooltip(_("Connected to the wired network") + " " + _("(Limited connectivity)"));
+                        this._setTooltip(_("Connected to the wired network") + " " + _("(Limited connectivity)"));
 
                     } else {
                         this._setIcon('xsi-network-wired');
-                        this.set_applet_tooltip(_("Connected to the wired network"));
+                        this._setTooltip(_("Connected to the wired network"));
                     }
                     break;
                 case NMConnectionCategory.WWAN:
@@ -2459,16 +2482,16 @@ CinnamonNetworkApplet.prototype = {
                     if (!dev.mobileDevice) {
                         // this can happen for bluetooth in PAN mode
                         this._setIcon('xsi-network-cellular-connected');
-                        this.set_applet_tooltip(_("Connected to the cellular network"));
+                        this._setTooltip(_("Connected to the cellular network"));
                         break;
                     }
 
                     if (limited_conn) {
                         this._setIcon('xsi-network-cellular-no-route');
-                        this.set_applet_tooltip(_("Connected to the cellular network") + " " + _("(Limited connectivity)"));
+                        this._setTooltip(_("Connected to the cellular network") + " " + _("(Limited connectivity)"));
                     } else {
                         this._setIcon('xsi-network-cellular-signal-' + signalToIcon(dev.mobileDevice.signal_quality));
-                        this.set_applet_tooltip(_("Connected to the cellular network"));
+                        this._setTooltip(_("Connected to the cellular network"));
                     }
 
                     break;
@@ -2476,36 +2499,43 @@ CinnamonNetworkApplet.prototype = {
                     // Should we indicate limited connectivity for VPNs like we do above? What if the connection is to
                     // a local machine? Need to test.
                     this._setIcon('xsi-network-vpn');
-                    this.set_applet_tooltip(_("Connected to the VPN"));
+                    this._setTooltip(_("Connected to the VPN"));
                     break;
                 default:
                     // fallback to a generic connected icon
                     // (it could be a private connection of some other user)
                     this._setIcon('xsi-network-wired');
-                    this.set_applet_tooltip(_("Connected to the network"));
+                    this._setTooltip(_("Connected to the network"));
                     break;
                 }
             }
-            for (let i = 0; i < this._activeConnections.length; i++) {
-                const a = this._activeConnections[i];
-                if (a._section === NMConnectionCategory.VPN && a.state === NM.ActiveConnectionState.ACTIVATING) {
-                    this._setIcon('xsi-network-vpn-acquiring');
-                    this.set_applet_tooltip(_("Connecting to the VPN..."));
-                    break;
-                }
-                else if (a._section === NMConnectionCategory.VPN && a.state === NM.ActiveConnectionState.ACTIVATED) {
-                    let iconName = 'xsi-network-vpn';
-                    if (mc._section == NMConnectionCategory.WIRELESS) {
-                        const dev = mc._primaryDevice;
-                        const ap = dev ? dev.device.active_access_point : null;
-                        if (ap)
-                            iconName = 'xsi-network-wireless-signal-' + signalToIcon(ap.strength) + '-secure';
-                    }
-                    this._setIcon(iconName);
-                    this.set_applet_tooltip(_("Connected to the VPN"));
-                    break;
-                }
+            /* Tunnels get their own indicator beside the link glyph, never a
+               padlock composited onto it: in the menu the "-secure" wifi
+               icons already mean "this access point is encrypted", and one
+               glyph must not carry two meanings. */
+            let tunnels = this._activeConnections.filter(a => a._section === NMConnectionCategory.VPN);
+            let upTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATED);
+            let actingTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATING);
+
+            if (actingTunnels.length) {
+                this._vpnIcon.icon_name = 'xsi-network-vpn-acquiring';
+                this._vpnIconBin.show();
+                this.set_applet_tooltip(_("Connecting to the VPN..."));
+            } else if (upTunnels.length) {
+                this._vpnIcon.icon_name = 'xsi-network-vpn';
+                this._vpnIconBin.show();
+
+                let names = upTunnels.map(a => (a.connection && a.connection._name)
+                                               ? a.connection._name : _("VPN"));
+                this.set_applet_tooltip(this._baseTooltip
+                                        ? this._baseTooltip + "  \u00b7  " + names.join(', ')
+                                        : names.join(', '));
+            } else {
+                this._vpnIconBin.hide();
             }
+
+            /* Panel badge: how many tunnels are up, once there is more than one. */
+            this.set_applet_label(upTunnels.length > 1 ? String(upTunnels.length) : "");
         }
         catch (e) {
             global.logError(e);
