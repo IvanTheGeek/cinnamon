@@ -130,16 +130,16 @@ function linkPreference(a) {
     return [addressed ? 2 : 3, 0];
 }
 
-/* The underline under a panel icon: a 2px bottom border, matched by 2px of
-   top padding so the icon stays centred like its neighbours; an icon with
-   no underline gets 2px of padding at each end instead, so showing the
-   underline moves nothing.  All four sides get the colour: St paints every
-   side in one colour, so "border-bottom: 2px solid <colour>" alone came out
-   invisible (Cinnamon 6.6.9). */
-function underlineStyle(color) {
+/* The primary line over a panel icon: a 2px top border, matched by 2px of
+   bottom padding so the icon stays centred like its neighbours; an icon
+   without the line gets 2px of padding at each end instead, so showing the
+   line moves nothing.  All four sides get the colour: St paints every side
+   in one colour, so "border-top: 2px solid <colour>" over transparent sides
+   came out invisible (Cinnamon 6.6.9). */
+function primaryLineStyle(color) {
     if (!color)
         return 'padding-top: 2px; padding-bottom: 2px;';
-    return 'padding-top: 2px; border: 0 solid ' + color + '; border-bottom-width: 2px;';
+    return 'padding-bottom: 2px; border: 0 solid ' + color + '; border-top-width: 2px;';
 }
 
 /* The kinds of link that get a panel icon of their own, in panel order. */
@@ -2213,11 +2213,11 @@ CinnamonNetworkApplet.prototype = {
                 this._linkIcons[kind] = this._makeLinkIcon();
             this._primaryConnection = null;
 
-            // the underline takes the panel's text colour: follow theme changes
+            // the primary line takes the panel's text colour: follow theme changes
             this.actor.connect('style-changed', () => {
                 for (let kind in this._linkIcons) {
-                    if (this._linkIcons[kind].underlined)
-                        this._setUnderline(this._linkIcons[kind], true);
+                    if (this._linkIcons[kind].primaryLine)
+                        this._setPrimaryLine(this._linkIcons[kind], true);
                 }
             });
 
@@ -2406,8 +2406,8 @@ CinnamonNetworkApplet.prototype = {
     _makeLinkIcon: function() {
         let icon = new St.Icon({ icon_type: St.IconType.SYMBOLIC,
                                  style_class: 'system-status-icon' });
-        // holds the underline (see _setUnderline())
-        let iconBin = new St.Bin({ child: icon, style: underlineStyle(null) });
+        // holds the primary line (see _setPrimaryLine())
+        let iconBin = new St.Bin({ child: icon, style: primaryLineStyle(null) });
         let count = new St.Label({ style_class: 'applet-label' });
         let box = new St.BoxLayout({ style: 'spacing: 2px;' });
         box.add(iconBin, { y_align: St.Align.MIDDLE, y_fill: false });
@@ -2421,25 +2421,25 @@ CinnamonNetworkApplet.prototype = {
         } catch (e) {
             // appended after the label instead; still usable
         }
-        return { box: box, iconBin: iconBin, icon: icon, count: count, underlined: false };
+        return { box: box, iconBin: iconBin, icon: icon, count: count, primaryLine: false };
     },
 
-    /* The panel's text colour as CSS, for the underline: St has no
+    /* The panel's text colour as CSS, for the primary line: St has no
        currentColor.  null while the applet is off the stage, where St would
        complain about reading a theme node. */
-    _underlineColor: function() {
+    _primaryLineColor: function() {
         if (!this.actor.get_stage())
             return null;
         let c = this.actor.get_theme_node().get_foreground_color();
         return 'rgba(' + c.red + ',' + c.green + ',' + c.blue + ',' + (c.alpha / 255).toFixed(2) + ')';
     },
 
-    _setUnderline: function(group, on) {
-        let color = on ? this._underlineColor() : null;
-        let style = underlineStyle(color);
+    _setPrimaryLine: function(group, on) {
+        let color = on ? this._primaryLineColor() : null;
+        let style = primaryLineStyle(color);
         if (group.iconBin.get_style() !== style)
             group.iconBin.set_style(style);
-        group.underlined = !!color;
+        group.primaryLine = !!color;
     },
 
     _activeAccessPoint: function(activeConnection) {
@@ -2525,17 +2525,18 @@ CinnamonNetworkApplet.prototype = {
             lines.push(linkKindTitle(kind) + ": " + names.join(", "));
         }
 
-        /* Underline the icon of the connection that carries the default
-           route, once two or more icons are up.  Under a full tunnel that
-           is the VPN icon, so the panel also tells a full tunnel from a
+        /* Draw a line over the icon of the connection that carries the
+           default route, once two or more icons are up.  Under a full tunnel
+           that is the VPN icon, so the panel also tells a full tunnel from a
            split one. */
         for (let kind of LINK_ICON_KINDS)
-            this._setUnderline(this._linkIcons[kind],
-                               shown >= 2 && primary !== null && primary._section === kind);
+            this._setPrimaryLine(this._linkIcons[kind],
+                                 shown >= 2 && primary !== null && primary._section === kind);
 
         this._applet_icon_box.visible = (shown == 0);
         if (shown)
             this.set_applet_tooltip(lines.join("\n"));
+
 
         /* Keep the drawn bars honest between timer ticks. */
         this._watchSignal(watchAp);
