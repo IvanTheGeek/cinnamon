@@ -159,6 +159,12 @@ const VPN_ICON_SCALE = 1.25;
    the icon moves only towards the next applet. */
 const VPN_ICON_TRIM = 0.15;
 
+/* Extra space between the panel's link icons, on top of the applet box's
+   own spacing, once two or more are shown: with the theme's spacing alone
+   they looked closer to each other than to the next applet (Ivan,
+   2026-11-11). */
+const LINK_ICON_GAP = 3;
+
 /* The kinds of link that get a panel icon of their own, in panel order. */
 const LINK_ICON_KINDS = [ NMConnectionCategory.WIRED,
                           NMConnectionCategory.WIRELESS,
@@ -2459,13 +2465,20 @@ CinnamonNetworkApplet.prototype = {
     },
 
     /* The padding before each icon's group: the trim its icon gave up (see
-       _fitPanelIcon()). */
+       _fitPanelIcon()), and LINK_ICON_GAP before every shown icon but the
+       first, when the icons sit side by side in a horizontal panel. */
     _spaceLinkIcons: function() {
-        for (let kind in this._linkIcons) {
+        let lead = 0;
+        for (let kind of LINK_ICON_KINDS) {
             let group = this._linkIcons[kind];
-            let style = 'spacing: 2px; padding-left: ' + group.trim + 'px;';
+            if (!group)
+                continue;
+            let shown = group.box.visible;
+            let style = 'spacing: 2px; padding-left: ' + (group.trim + (shown ? lead : 0)) + 'px;';
             if (group.box.get_style() !== style)
                 group.box.set_style(style);
+            if (shown && this._horizontalPanel())
+                lead = LINK_ICON_GAP;
         }
     },
 
@@ -2600,6 +2613,7 @@ CinnamonNetworkApplet.prototype = {
 
             lines.push(linkKindTitle(kind) + ": " + names.join(", "));
         }
+        this._spaceLinkIcons();
 
         /* Draw a line over the icon of the connection that carries the
            default route, once two or more icons are up.  Under a full tunnel
