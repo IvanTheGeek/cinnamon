@@ -122,6 +122,63 @@ function ssidToLabel(ssid) {
     return label;
 }
 
+/* Frequency (MHz) -> band.  The 5 GHz band tops out at 5895; U-NII-5, the
+   bottom of 6 GHz, starts at 5925.  NM has no 6 GHz helper of its own. */
+function bandOfFrequency(freq) {
+    if (!freq)
+        return null;
+    if (freq < 2500)
+        return '2.4';
+    if (freq < 5925)
+        return '5';
+    return '6';
+}
+
+/* The distinct bands an SSID is reachable on, low to high. */
+function bandsOfAccessPoints(accessPoints) {
+    let seen = { };
+    for (let i = 0; i < accessPoints.length; i++) {
+        let b = bandOfFrequency(accessPoints[i].get_frequency());
+        if (b)
+            seen[b] = true;
+    }
+    return ['2.4', '5', '6'].filter(b => seen[b]);
+}
+
+/* What the wifi rows show.  Mirrored here from the applet's settings because
+   the menu items hold no reference back to the applet. */
+let ROW_OPTS = { band: true, width: false, security: false, percent: true };
+
+/* Security label straight from the scan, as text for the row.  Classify from
+   the raw flags and distinguish personal from enterprise -- PSK vs
+   KEY_MGMT_802_1X is exactly that distinction. */
+function apSecurityLabel(ap) {
+    const F = NM80211ApSecurityFlags;
+    let rsn = ap.rsn_flags, wpa = ap.wpa_flags;
+
+    if (rsn != F.NONE) {
+        if (rsn & F.KEY_MGMT_EAP_SUITE_B_192)
+            return 'WPA3-Ent';
+        if ((rsn & F.KEY_MGMT_SAE) && (rsn & F.KEY_MGMT_PSK))
+            return 'WPA2/3';          // transition mode, what nmcli calls "WPA2 WPA3"
+        if (rsn & F.KEY_MGMT_SAE)
+            return 'WPA3';
+        if ((rsn & F.KEY_MGMT_OWE) || (rsn & F.KEY_MGMT_OWE_TM))
+            return 'OWE';             // Enhanced Open -- encrypted but no key
+        if (rsn & F.KEY_MGMT_802_1X)
+            return 'WPA2-Ent';
+        return 'WPA2';
+    }
+
+    if (wpa != F.NONE)
+        return (wpa & F.KEY_MGMT_802_1X) ? 'WPA-Ent' : 'WPA';
+
+    if (ap.flags & NM80211ApFlags.PRIVACY)
+        return 'WEP';
+
+    return 'Open';
+}
+
 function NMNetworkMenuItem() {
     this._init.apply(this, arguments);
 }
@@ -139,12 +196,12 @@ NMNetworkMenuItem.prototype = {
 
         accessPoints = sortAccessPoints(accessPoints);
         this.bestAP = accessPoints[0];
+        this._allAps = accessPoints;
+        this._activeAp = null;
 
         this._label = new St.Label({ text: title });
         this.addActor(this._label);
-        let strStrengh = String(this.bestAP.strength);
-        strStrengh = strStrengh + '%';
-        this._labelStrength = new St.Label({ text: strStrengh });
+        this._labelStrength = new St.Label({ text: this._metaText() });
         this.addActor(this._labelStrength, { align: St.Align.END });
         this._icons = new St.BoxLayout({ style_class: 'nm-menu-item-icons' });
         this.addActor(this._icons, { align: St.Align.END });
@@ -171,9 +228,44 @@ NMNetworkMenuItem.prototype = {
             this.bestAP = ap;
 
         this._signalIcon.icon_name = this._getIcon();
-        let strStrengh = String(this.bestAP.strength);
-        strStrengh = strStrengh + '%';
-        this._labelStrength.set_text(strStrengh);
+        this._refreshMeta();
+    },
+
+    /* "2.4\u00b7[5]\u00b76 GHz \u00b7 75%" -- every band this SSID is on, with the
+       one we are associated to in brackets.  Brackets rather than bold: no
+       Pango markup to escape, and no reliance on the panel theme's weights. */
+    _metaText: function() {
+        let parts = [];
+
+        if (ROW_OPTS.band) {
+            let aps = (this._allAps && this._allAps.length) ? this._allAps : [ this.bestAP ];
+            let bands = bandsOfAccessPoints(aps);
+            let activeBand = this._activeAp ? bandOfFrequency(this._activeAp.get_frequency()) : null;
+            if (bands.length)
+                parts.push(bands.map(b => (b === activeBand ? '[' + b + ']' : b)).join('\u00b7') + ' GHz');
+        }
+
+        /* Channel width is a property of ONE access point, so on a merged
+           multi-band row this is the width of the strongest one only. */
+        if (ROW_OPTS.width && this.bestAP.bandwidth)
+            parts.push(this.bestAP.bandwidth + ' MHz');
+
+        if (ROW_OPTS.security)
+            parts.push(apSecurityLabel(this.bestAP));
+
+        if (ROW_OPTS.percent)
+            parts.push(String(this.bestAP.strength) + '%');
+
+        return parts.join(' \u00b7 ');
+    },
+
+    _refreshMeta: function() {
+        this._labelStrength.set_text(this._metaText());
+    },
+
+    setActiveAp: function(ap) {
+        this._activeAp = ap || null;
+        this._refreshMeta();
     },
 
     _getIcon: function() {
@@ -195,6 +287,7 @@ NMNetworkMenuItem.prototype = {
 
         accessPoints = sortAccessPoints(accessPoints);
         this.bestAP = accessPoints[0];
+        this._allAps = accessPoints;
         this._accessPoints = [ ];
         for (let i = 0; i < accessPoints.length; i++) {
             let ap = accessPoints[i];
@@ -204,6 +297,8 @@ NMNetworkMenuItem.prototype = {
             };
             this._accessPoints.push(apObj);
         }
+
+        this._refreshMeta();
     },
 
     destroy: function() {
@@ -1685,6 +1780,8 @@ NMDeviceWireless.prototype = {
         }
         this._activeConnectionItem.setShowDot(true);
         this._activeConnectionItem.actor.add_style_class_name('popup-device-menu-item');
+        if (this._activeConnectionItem.setActiveAp)
+            this._activeConnectionItem.setActiveAp(this.device.active_access_point);
     },
 
     _createAutomaticConnection: function(apObj) {
@@ -1851,6 +1948,11 @@ CinnamonNetworkApplet.prototype = {
 
             this.settings = new Settings.AppletSettings(this, metadata.uuid, this.instance_id);
             this.settings.bind("keyOpen", "keyOpen", this._setKeybinding);
+            this.settings.bind("showBand", "showBand", this._onRowOptsChanged);
+            this.settings.bind("showChannelWidth", "showChannelWidth", this._onRowOptsChanged);
+            this.settings.bind("showSecurity", "showSecurity", this._onRowOptsChanged);
+            this.settings.bind("showSignalPercent", "showSignalPercent", this._onRowOptsChanged);
+            this._syncRowOpts();
             this._setKeybinding();
 
             NM.Client.new_async(null, Lang.bind(this, this._clientGot));
@@ -1994,6 +2096,27 @@ CinnamonNetworkApplet.prototype = {
         if (this._currentIconName !== name) {
             this.set_applet_icon_symbolic_name(name);
             this._currentIconName = name;
+        }
+    },
+
+    /* Mirror the settings into the module-level ROW_OPTS the menu items read. */
+    _syncRowOpts: function() {
+        ROW_OPTS.band     = this.showBand;
+        ROW_OPTS.width    = this.showChannelWidth;
+        ROW_OPTS.security = this.showSecurity;
+        ROW_OPTS.percent  = this.showSignalPercent;
+    },
+
+    _onRowOptsChanged: function() {
+        this._syncRowOpts();
+
+        // called from a settings change, long after _init, but be safe
+        if (!this._devices || !this._devices.wireless)
+            return;
+
+        for (let dev of this._devices.wireless.devices) {
+            dev._clearSection();
+            dev._createSection();
         }
     },
 
