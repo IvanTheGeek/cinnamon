@@ -159,6 +159,12 @@ const VPN_ICON_SCALE = 1.25;
    the icon moves only towards the next applet. */
 const VPN_ICON_TRIM = 0.15;
 
+/* How long the VPN rows keep their places after a tunnel goes up or down,
+   before the active ones move to the top.  The switch and the "*" update at
+   once; moving the rows the moment a switch was clicked was "a bit jarring"
+   (Ivan, 2026-11-11, who asked for about 2 seconds). */
+const VPN_REORDER_DELAY_MS = 2000;
+
 /* Extra space between the panel's link icons, on top of the applet box's
    own spacing, once two or more are shown: with the theme's spacing alone
    they looked closer to each other than to the next applet (Ivan,
@@ -1526,6 +1532,26 @@ NMDeviceVPN.prototype = {
         let layoutChanged = !shown || shown.length != ordered.length ||
                             ordered.some((obj, i) => obj !== shown[i] || !obj.item);
 
+        /* Only the order changed: a tunnel went up or down.  Keep the rows
+           where they are for now, with their switches and marks brought up to
+           date, and move the active tunnels to the top VPN_REORDER_DELAY_MS
+           later (see there).  The wait restarts only when the wanted order
+           changes again, not on every refresh: the applet refreshes the rows
+           every few seconds while the menu is open. */
+        if (layoutChanged && !this._reorderDue && shown && shown.length == ordered.length &&
+            ordered.every(obj => obj.item && shown.includes(obj))) {
+            for (let obj of shown)
+                this._updateConnectionItemView(obj.item, obj.connection, active.includes(obj));
+
+            let wanted = ordered.map(obj => obj.uuid).join('\n');
+            if (!this._reorderId || this._reorderWanted !== wanted) {
+                this._reorderWanted = wanted;
+                this._scheduleReorder();
+            }
+            return;
+        }
+
+        this._cancelReorder();
         if (layoutChanged) {
             this._clearSection();
 
@@ -1539,6 +1565,27 @@ NMDeviceVPN.prototype = {
 
         for (let i = 0; i < ordered.length; i++)
             this._updateConnectionItemView(ordered[i].item, ordered[i].connection, i < active.length);
+    },
+
+    _scheduleReorder: function() {
+        this._cancelReorder();
+        this._reorderId = Mainloop.timeout_add(VPN_REORDER_DELAY_MS, () => {
+            this._reorderId = 0;
+            this._reorderDue = true;
+            try {
+                this._createSection();
+            } finally {
+                this._reorderDue = false;
+            }
+            return false;
+        });
+    },
+
+    _cancelReorder: function() {
+        if (this._reorderId) {
+            Mainloop.source_remove(this._reorderId);
+            this._reorderId = 0;
+        }
     },
 };
 
@@ -3506,6 +3553,8 @@ CinnamonNetworkApplet.prototype = {
             Mainloop.source_remove(this._remeasureId);
             this._remeasureId = 0;
         }
+        if (this._devices && this._devices.vpn && this._devices.vpn.device)
+            this._devices.vpn.device._cancelReorder();
         ROW_TEXT_CHANGED = null;
         this._watchSignal(null);
     },
