@@ -621,12 +621,24 @@ NMDevice.prototype = {
     },
 
     checkConnection: function(connection) {
-        let exists = this._findConnection(connection._uuid) != -1;
+        let pos = this._findConnection(connection._uuid);
+        let exists = pos != -1;
         let valid = this.connectionValid(connection);
-        if (exists && !valid)
+        if (exists && !valid) {
             this.removeConnection(connection);
-        else if (!exists && valid)
+        } else if (!exists && valid) {
             this.addConnection(connection);
+        } else if (exists) {
+            // edited in place -- most visibly, renamed
+            let obj = this._connections[pos];
+            obj.timestamp = connection._timestamp;
+            if (obj.name !== connection._name) {
+                obj.name = connection._name;
+                this._connections.sort(this._connectionSortFunction);
+                this._clearSection();
+                this._createSection();
+            }
+        }
     },
 
     addConnection: function(connection) {
