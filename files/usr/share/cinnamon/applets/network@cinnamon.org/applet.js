@@ -3,6 +3,7 @@ const GLib = imports.gi.GLib;
 const Gio = imports.gi.Gio;
 const GObject = imports.gi.GObject;
 const Lang = imports.lang;
+const Pango = imports.gi.Pango;
 const NM = imports.gi.NM;
 const Signals = imports.signals;
 const St = imports.gi.St;
@@ -149,6 +150,17 @@ function bandsOfAccessPoints(accessPoints) {
    the menu items hold no reference back to the applet. */
 let ROW_OPTS = { band: true, width: false, security: false, percent: true };
 
+/* Cap on the SSID column.  Without one the menu simply grows to fit the longest
+   name in range -- a single "DO_NOT_CONNECT_MESH-FX4100-1CD8" was measured at
+   250px and dragged the whole panel out with it, and stock has the same problem.
+   St does NOT honour "max-width" for a label's preferred width (verified: a
+   250px label still reports 250 under max-width:150), so the cap has to be
+   applied as an explicit "width" and only when the natural width exceeds it --
+   otherwise every short SSID would be padded out to the cap and the menu would
+   get WIDER in the common case. */
+const MAX_SSID_WIDTH = 190;
+const MAX_SSID_CHARS = 24;
+
 /* Security label straight from the scan, as text for the row.  Classify from
    the raw flags and distinguish personal from enterprise -- PSK vs
    KEY_MGMT_802_1X is exactly that distinction. */
@@ -201,10 +213,29 @@ NMNetworkMenuItem.prototype = {
 
         this._label = new St.Label({ text: title });
         this.addActor(this._label);
-        this._labelStrength = new St.Label({ text: this._metaText() });
-        this.addActor(this._labelStrength, { align: St.Align.END });
         this._icons = new St.BoxLayout({ style_class: 'nm-menu-item-icons' });
-        this.addActor(this._icons, { align: St.Align.END });
+        /* span: -1 makes availWidth run to the item's right edge, and align END
+           then places the box at its natural width flush against that edge, so
+           the bars line up with the switches on the other rows.  Without it a
+           two-column row stops short of a three-column one and leaves a gap to
+           the right of the bars. */
+        this.addActor(this._icons, { align: St.Align.END, span: -1 });
+
+        /* The band/strength text goes INSIDE the icon box rather than taking a
+           column of its own.  PopupBaseMenuItem inserts `spacing` between every
+           column -- 1em under Mint-Y, ~13px at Ubuntu 10 -- so a third column
+           cost two full gaps.  Inside the box it is separated by
+           .nm-menu-item-icons' .5em instead, returning roughly 1.5em of width
+           to the SSID, which is the column that actually needs it. */
+        this._labelStrength = new St.Label({ text: this._metaText() });
+        /* Never ellipsize the band/strength text.  St.Label defaults to
+           ellipsize END, so on the widest row the meta was truncating to
+           "2.4\u00b75 GHz\u2026" -- which reads as a broken column even though the
+           icon itself stays put.  The SSID keeps the default and gives way
+           instead: a clipped network name is far less harmful than a clipped
+           signal reading, and it keeps the bars pinned right. */
+        this._labelStrength.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        this._icons.add(this._labelStrength, { y_align: St.Align.MIDDLE, y_fill: false });
 
         this._signalIcon = new St.Icon({ icon_name: this._getIcon(),
                                          style_class: 'popup-menu-icon' });
@@ -221,6 +252,11 @@ NMNetworkMenuItem.prototype = {
             };
             this._accessPoints.push(apObj);
         }
+
+        /* Also cap here, not only from _refreshMeta(): rows that overflow into
+           the "More" submenu may never receive a strength update, and their
+           uncapped width still sizes the whole menu. */
+        this._capLabelWidth();
     },
 
     _updated: function(ap) {
@@ -259,8 +295,32 @@ NMNetworkMenuItem.prototype = {
         return parts.join(' \u00b7 ');
     },
 
+    /* Setting the text is NOT enough.  The icon box caches a preferred width,
+       and it does not get invalidated when the child label's text changes.  So
+       when the meta shrinks -- "2.4\u00b75 GHz \u00b7 100%" -> "2.4\u00b75 GHz \u00b7 99%", which
+       happens on every signal update, ~8/min -- the box keeps its old, wider
+       allocation, St packs the children from the left, and the signal icon ends
+       up short of the right edge every other row lines up on.  This is what
+       makes the list look misaligned a few seconds after the menu is opened and
+       the scan results land.  queue_relayout() drops the cached size. */
     _refreshMeta: function() {
         this._labelStrength.set_text(this._metaText());
+        this._icons.queue_relayout();
+        this._capLabelWidth();
+    },
+
+    /* Hand-rolled max-width for the SSID (see MAX_SSID_WIDTH).
+       Deliberately keyed off TEXT LENGTH, not a measurement.  St applies neither
+       set_style() nor set_text() synchronously, so get_preferred_width() right
+       after either one returns a stale number -- measured live, a 31-character
+       name reported 43px immediately after set_text(), and a cleared style still
+       reported the old capped width.  Both make a measure-then-decide cap
+       oscillate or latch wrongly.  Character count needs no realized actor and
+       is stable on repeat calls; ~24 characters is about MAX_SSID_WIDTH in the
+       default panel font. */
+    _capLabelWidth: function() {
+        if (this._label.get_text().length > MAX_SSID_CHARS)
+            this._label.set_style('width: ' + MAX_SSID_WIDTH + 'px;');
     },
 
     setActiveAp: function(ap) {
@@ -1782,6 +1842,19 @@ NMDeviceWireless.prototype = {
         this._activeConnectionItem.actor.add_style_class_name('popup-device-menu-item');
         if (this._activeConnectionItem.setActiveAp)
             this._activeConnectionItem.setActiveAp(this.device.active_access_point);
+
+        /* '.popup-device-menu-item' is added a line above, AFTER the item was
+           built, and it sets font-weight: bold.  The icon box has by then cached
+           a preferred width computed from the pre-bold metrics, so on first
+           layout it is allocated ~8px wider than its children need; St packs
+           them from the left and the signal icon ends up short of the right
+           edge that every other row lines up on.  It self-corrects on the next
+           relayout, which is what made it look intermittent.  queue_relayout()
+           drops the cached size so the FIRST allocation is already right.
+           A PopupImageMenuItem (network not in the scan list) has no icon box. */
+        this._activeConnectionItem.actor.queue_relayout();
+        if (this._activeConnectionItem._icons)
+            this._activeConnectionItem._icons.queue_relayout();
     },
 
     _createAutomaticConnection: function(apObj) {
