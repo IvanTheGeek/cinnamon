@@ -95,24 +95,54 @@ function signalToIcon(value) {
     return 'none';
 }
 
-/* How good a candidate an active connection is for "the physical link":
-   3  it holds the default route (IPv4 or IPv6);
-   2  it has a gateway.  Under a full tunnel no physical link holds the
-      default route, and the tunnel's underlay rides the main table's
-      default route, which belongs to the connection with the gateway;
-   1  it has an address (e.g. a never-default bench cable);
-   0  nothing (e.g. a link brought up with IP disabled).
-   Ties keep NM's order. */
-function linkRank(a) {
+/* How NM ranks a link, as [tier, metric]; lower is better:
+   [0, 0]       it holds NM's default route (IPv4 or IPv6);
+   [1, metric]  it has a default route of its own, at that metric.  Under a
+                full tunnel no link holds NM's default, but libnm keeps
+                reporting each link's own 0.0.0.0/0 with its metric (seen on
+                NM 1.46.0: the cable at 101, the Wi-Fi at 600), and the
+                lowest metric is the link NM itself would use;
+   [2, 0]       it has an address (e.g. a never-default bench cable);
+   [3, 0]       nothing (e.g. a link brought up with IP disabled). */
+function linkPreference(a) {
     if (a['default'] || a.default6)
-        return 3;
+        return [0, 0];
 
-    let configs = [ a.get_ip4_config(), a.get_ip6_config() ];
-    if (configs.some(c => c && c.get_gateway()))
-        return 2;
-    if (configs.some(c => c && c.get_addresses().length > 0))
-        return 1;
-    return 0;
+    let hasDefault = false;
+    let metric = Number.MAX_SAFE_INTEGER;
+    let addressed = false;
+    for (let c of [ a.get_ip4_config(), a.get_ip6_config() ]) {
+        if (!c)
+            continue;
+        if (c.get_addresses().length > 0)
+            addressed = true;
+        for (let r of c.get_routes()) {
+            if (r.get_prefix() !== 0)
+                continue;
+            hasDefault = true;
+            // a negative metric means "unset"; rank it after any real one
+            if (r.get_metric() >= 0 && r.get_metric() < metric)
+                metric = r.get_metric();
+        }
+    }
+    if (hasDefault)
+        return [1, metric];
+    return [addressed ? 2 : 3, 0];
+}
+
+/* The link NM prefers among `links` (see linkPreference()).  Ties keep NM's
+   order, which lists the newest connection first. */
+function preferredLink(links) {
+    let best = null;
+    let bestKey = null;
+    for (let a of links) {
+        let key = linkPreference(a);
+        if (!best || key[0] < bestKey[0] || (key[0] === bestKey[0] && key[1] < bestKey[1])) {
+            best = a;
+            bestKey = key;
+        }
+    }
+    return best;
 }
 
 /* '-secure' when the access point is encrypted, '' when it is open.
@@ -2856,25 +2886,15 @@ CinnamonNetworkApplet.prototype = {
             let upTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATED);
             let actingTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATING);
 
-            /* The physical link to draw: the best-ranked wireless, wired or
-               WWAN connection (see linkRank()).  NM lists the newest first, so
-               taking the first one let an address-less test link or a
-               never-default bench cable win under a full tunnel. */
-            let physical = null;
-            let physicalRank = -1;
-            for (let i = 0; i < this._activeConnections.length; i++) {
-                let a = this._activeConnections[i];
-                if (a._section !== NMConnectionCategory.WIRELESS &&
-                    a._section !== NMConnectionCategory.WIRED &&
-                    a._section !== NMConnectionCategory.WWAN)
-                    continue;
-
-                let rank = linkRank(a);
-                if (rank > physicalRank) {
-                    physical = a;
-                    physicalRank = rank;
-                }
-            }
+            /* The physical link to draw: the wireless, wired or WWAN
+               connection NM prefers (see linkPreference()).  Ranking only on
+               "has a gateway" tied the cable with the Wi-Fi under a full
+               tunnel, and NM's newest-first order then drew the Wi-Fi
+               although NM itself preferred the cable. */
+            let physical = preferredLink(this._activeConnections.filter(a =>
+                a._section === NMConnectionCategory.WIRELESS ||
+                a._section === NMConnectionCategory.WIRED ||
+                a._section === NMConnectionCategory.WWAN));
             this._physicalLink = physical;   // read by Eval probes when testing
 
             /* A full-tunnel connection owns the default route, so it becomes
