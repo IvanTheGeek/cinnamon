@@ -295,6 +295,19 @@ function markPrimary(text, isPrimary) {
    PopupSwitchMenuItem holds its switch alone in _statusBin (the same on
    6.6.9 and master), so wrap the switch once in a box with the mark in
    front of it.  The row's status text stays where it is. */
+/* Call before a menu section's rows are destroyed.  When one of them holds
+   the key focus (the pointer is over it, or its switch was just flipped,
+   which leaves the menu open), move the focus to the section itself:
+   destroying the row would take the focus out of the menu, and Cinnamon
+   closes a menu that loses the focus (PopupMenuManager._onKeyFocusChanged).
+   Flipping one VPN switch closed the menu when NM's change rebuilt the
+   rows (Ivan, 2026-11-11). */
+function keepFocusInSection(section) {
+    let focus = global.stage.get_key_focus();
+    if (focus && focus !== section.actor && section.actor.contains(focus))
+        section.actor.grab_key_focus();
+}
+
 function setSwitchMark(item, on) {
     if (!item._primaryMark) {
         if (!on)
@@ -944,6 +957,7 @@ NMDevice.prototype = {
 
     _clearSection: function() {
         // Clear everything
+        keepFocusInSection(this.section);
         this.section.removeAll();
         this._autoConnectionItem = null;
         this._activeConnectionItem = null;
@@ -1418,8 +1432,10 @@ NMDeviceVPN.prototype = {
     },
 
     _clearSection: function() {
-        if (this.section && this.section.removeAll)
+        if (this.section && this.section.removeAll) {
+            keepFocusInSection(this.section);
             this.section.removeAll();
+        }
 
         this._autoConnectionItem = null;
         this._overflowItem = null;
