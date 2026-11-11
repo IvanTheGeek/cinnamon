@@ -286,6 +286,10 @@ let ROW_OPTS = { band: true, width: false, security: false, percent: true };
    mirrored here for the menu rows for the same reason.  Set by the applet. */
 let PRIMARY_CONNECTION = null;
 
+/* Called by a Wi-Fi row whose details text changed, so the applet can measure
+   the open menu again (see _remeasureOpenMenuSoon()).  Set by the applet. */
+let ROW_TEXT_CHANGED = null;
+
 /* The tooltip's mark for the connection that carries the default route. */
 function markPrimary(text, isPrimary) {
     return isPrimary ? text + " *" : text;
@@ -483,6 +487,8 @@ NMNetworkMenuItem.prototype = {
         this._labelStrength.set_text(this._metaText());
         this._icons.queue_relayout();
         this._capLabelWidth();
+        if (ROW_TEXT_CHANGED)
+            ROW_TEXT_CHANGED();
     },
 
     /* Hand-rolled max-width for the SSID (see MAX_SSID_WIDTH).
@@ -2290,6 +2296,8 @@ CinnamonNetworkApplet.prototype = {
                 }
             });
 
+            ROW_TEXT_CHANGED = () => this._remeasureOpenMenuSoon();
+
             this.settings = new Settings.AppletSettings(this, metadata.uuid, this.instance_id);
             this.settings.bind("keyOpen", "keyOpen", this._setKeybinding);
             this.settings.bind("showBand", "showBand", this._onRowOptsChanged);
@@ -2807,6 +2815,25 @@ CinnamonNetworkApplet.prototype = {
                 walk(child);
         };
         walk(this.menu.box);
+    },
+
+    /* A row whose text changes while the menu is open, or in the moment it
+       opens, can keep the width its old text had.  On Ivan's laptop two
+       Wi-Fi rows stayed cut off at "... Open \u00b7 4" after their 5 GHz access
+       points arrived (2026-11-11).  Queueing a relayout on the row's own
+       actors did not measure it again reliably (realm); the pass that runs
+       before an open did, every time.  So run that pass again 100ms after
+       the menu opens and after any change while it is open, at most once
+       per 100ms however many rows change. */
+    _remeasureOpenMenuSoon: function() {
+        if (this._remeasureId || !this.menu.isOpen)
+            return;
+        this._remeasureId = Mainloop.timeout_add(100, () => {
+            this._remeasureId = 0;
+            if (this.menu.isOpen)
+                this._forgetMenuSizes();
+            return false;
+        });
     },
 
     _ensureSource: function() {
@@ -3465,6 +3492,7 @@ CinnamonNetworkApplet.prototype = {
 
         if (open) {
             this._rescanAccessPoints();
+            this._remeasureOpenMenuSoon();
         }
     },
 
@@ -3474,6 +3502,11 @@ CinnamonNetworkApplet.prototype = {
         if (this._periodicTimeoutId){
             Mainloop.source_remove(this._periodicTimeoutId);
         }
+        if (this._remeasureId) {
+            Mainloop.source_remove(this._remeasureId);
+            this._remeasureId = 0;
+        }
+        ROW_TEXT_CHANGED = null;
         this._watchSignal(null);
     },
 
