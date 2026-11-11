@@ -2531,6 +2531,35 @@ CinnamonNetworkApplet.prototype = {
             let upTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATED);
             let actingTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATING);
 
+            let physical = null;
+            for (let i = 0; i < this._activeConnections.length; i++) {
+                let a = this._activeConnections[i];
+                if (a._section === NMConnectionCategory.WIRELESS ||
+                    a._section === NMConnectionCategory.WIRED ||
+                    a._section === NMConnectionCategory.WWAN) {
+                    if (!physical || a['default'])
+                        physical = a;
+                }
+            }
+
+            /* A full-tunnel connection owns the default route, so it becomes
+               _mainConnection and the switch above drew the tunnel in place
+               of the link.  Redraw the base from the physical connection so
+               the signal strength stays visible. */
+            if (physical && mc && mc._section === NMConnectionCategory.VPN) {
+                if (physical._section === NMConnectionCategory.WIRELESS) {
+                    let pdev = physical._primaryDevice;
+                    let pap = (pdev && pdev.device) ? pdev.device.active_access_point : null;
+                    if (pap) {
+                        this._setIcon('xsi-network-wireless-signal-' + signalToIcon(pap.strength) + apSecuritySuffix(pdev, pap));
+                        this._setTooltip(_("Wireless connection") + ": " + ssidToLabel(pap.get_ssid()) + " (" + pap.strength + "%)");
+                    }
+                } else if (physical._section === NMConnectionCategory.WIRED) {
+                    this._setIcon('xsi-network-wired');
+                    this._setTooltip(_("Connected to the wired network"));
+                }
+            }
+
             if (actingTunnels.length) {
                 this._vpnIcon.icon_name = 'xsi-network-vpn-acquiring';
                 this._vpnIconBin.show();
