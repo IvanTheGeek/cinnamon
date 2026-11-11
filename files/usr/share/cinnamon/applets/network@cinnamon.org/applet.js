@@ -259,6 +259,34 @@ function bandsOfAccessPoints(accessPoints) {
    the menu items hold no reference back to the applet. */
 let ROW_OPTS = { band: true, width: false, security: false, percent: true };
 
+/* The active connection that carries the default route (primaryConnection()),
+   mirrored here for the menu rows for the same reason.  Set by the applet. */
+let PRIMARY_CONNECTION = null;
+
+/* The tooltip's mark for the connection that carries the default route. */
+function markPrimary(text, isPrimary) {
+    return isPrimary ? text + " *" : text;
+}
+
+/* The menu's mark for it: an asterisk right before the row's switch.  A
+   PopupSwitchMenuItem holds its switch alone in _statusBin (the same on
+   6.6.9 and master), so wrap the switch once in a box with the mark in
+   front of it.  The row's status text stays where it is. */
+function setSwitchMark(item, on) {
+    if (!item._primaryMark) {
+        if (!on)
+            return;
+        let sw = item._switch.actor;
+        item._statusBin.set_child(null);
+        let box = new St.BoxLayout({ style: 'spacing: 6px;' });
+        item._primaryMark = new St.Label({ text: "*" });
+        box.add(item._primaryMark, { y_align: St.Align.MIDDLE, y_fill: false });
+        box.add(sw, { y_align: St.Align.MIDDLE, y_fill: false });
+        item._statusBin.set_child(box);
+    }
+    item._primaryMark.visible = on;
+}
+
 /* Cap on the SSID column.  Without one the menu simply grows to fit the longest
    name in range -- a single "DO_NOT_CONNECT_MESH-FX4100-1CD8" was measured at
    250px and dragged the whole panel out with it, and stock has the same problem.
@@ -505,6 +533,7 @@ NMWiredSectionTitleMenuItem.prototype = {
             this.setStatus('');
             this._switch.actor.visible = false;
         }
+        setSwitchMark(this, device ? device.isPrimary : false);
     },
 
     activate: function(event) {
@@ -565,6 +594,7 @@ NMWirelessSectionTitleMenuItem.prototype = {
             this.setStatus(null);
             this._switch.actor.show();
         }
+        setSwitchMark(this, device ? device.isPrimary : false);
     },
 
     activate: function(event) {
@@ -806,6 +836,14 @@ NMDevice.prototype = {
         // in the majority of cases (wired, wwan, vpn)
     },
 
+    /* Whether this device's connection carries the default route.  Its own
+       row, or the section heading that stands in for a lone device, then
+       shows the mark (see setSwitchMark()). */
+    get isPrimary() {
+        return this._activeConnection != null &&
+               this._activeConnection === PRIMARY_CONNECTION;
+    },
+
     get statusLabel(){
         switch(this.device.state) {
         case NM.DeviceState.DISCONNECTED:
@@ -997,6 +1035,7 @@ NMDevice.prototype = {
 
         this.statusItem.setStatus(this.statusLabel);
         this.statusItem.setToggleState(this.connected);
+        setSwitchMark(this.statusItem, this.isPrimary);
         // if this device is not controllable, hide the switch
         this.statusItem._switch.actor.visible = this.controllable;
     },
@@ -1367,6 +1406,8 @@ NMDeviceVPN.prototype = {
         item.label.text = connection._name  || _("Connected (private)");
         item.setStatus(this._kindLabel(connection));
         item.setToggleState(active);
+        setSwitchMark(item, PRIMARY_CONNECTION != null &&
+                            PRIMARY_CONNECTION.connection === connection);
     },
 
     removeConnection: function(connection) {
@@ -2418,6 +2459,19 @@ CinnamonNetworkApplet.prototype = {
 
         this._sizePanelIcons();
 
+        let primary = primaryConnection(this._activeConnections);
+        if (primary !== PRIMARY_CONNECTION) {
+            PRIMARY_CONNECTION = primary;
+            this._refreshPrimaryMarks();
+        }
+        this._primaryConnection = primary;
+
+        // the tooltip stars the primary too, once it lists more than one
+        let listed = this._activeConnections.filter(a =>
+            LINK_ICON_KINDS.includes(a._section) &&
+            (a.state === NM.ActiveConnectionState.ACTIVATED ||
+             a.state === NM.ActiveConnectionState.ACTIVATING)).length;
+
         for (let kind of LINK_ICON_KINDS) {
             let group = this._linkIcons[kind];
             let all = this._activeConnections.filter(a => a._section === kind);
@@ -2434,8 +2488,9 @@ CinnamonNetworkApplet.prototype = {
             let ordered = best ? [ best ].concat(up.filter(a => a !== best)) : [];
             let names = ordered.map(a => {
                 let ap = (kind === NMConnectionCategory.WIRELESS) ? this._activeAccessPoint(a) : null;
-                return ap ? ssidToLabel(ap.get_ssid()) + " (" + ap.strength + "%)"
-                          : activeConnectionName(a);
+                let name = ap ? ssidToLabel(ap.get_ssid()) + " (" + ap.strength + "%)"
+                              : activeConnectionName(a);
+                return markPrimary(name, listed > 1 && a === primary);
             });
             for (let a of acting)
                 names.push(activeConnectionName(a) + " (" + _("connecting...") + ")");
@@ -2471,8 +2526,6 @@ CinnamonNetworkApplet.prototype = {
            route, once two or more icons are up.  Under a full tunnel that
            is the VPN icon, so the panel also tells a full tunnel from a
            split one. */
-        let primary = primaryConnection(this._activeConnections);
-        this._primaryConnection = primary;
         for (let kind of LINK_ICON_KINDS)
             this._setUnderline(this._linkIcons[kind],
                                shown >= 2 && primary !== null && primary._section === kind);
@@ -2492,6 +2545,24 @@ CinnamonNetworkApplet.prototype = {
             this._linkIcons[kind].box.hide();
         this._applet_icon_box.show();
         this._watchSignal(null);
+    },
+
+    /* PRIMARY_CONNECTION changed: move the menu's mark on every device row,
+       on the section headings that stand in for a lone device, and on the
+       VPN rows. */
+    _refreshPrimaryMarks: function() {
+        for (let category of [ NMConnectionCategory.WIRED,
+                               NMConnectionCategory.WIRELESS,
+                               NMConnectionCategory.WWAN ]) {
+            for (let dev of this._devices[category].devices) {
+                if (dev.statusItem)
+                    setSwitchMark(dev.statusItem, dev.isPrimary);
+            }
+            this._syncSectionTitle(category);
+        }
+
+        // reuses the rows while the list is unchanged, refreshing them
+        this._devices.vpn.device._createSection();
     },
 
     on_panel_icon_size_changed: function(size) {
