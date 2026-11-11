@@ -1,4 +1,5 @@
 const Applet = imports.ui.applet;
+const Clutter = imports.gi.Clutter;
 const GLib = imports.gi.GLib;
 const Gio = imports.gi.Gio;
 const GObject = imports.gi.GObject;
@@ -2217,7 +2218,7 @@ CinnamonNetworkApplet.prototype = {
                "this Wi-Fi network is encrypted", as it does in the menu. */
             this._linkIcons = { };
             for (let kind of LINK_ICON_KINDS)
-                this._linkIcons[kind] = this._makeLinkIcon();
+                this._linkIcons[kind] = this._makeLinkIcon(kind);
             this._primaryConnection = null;
 
             // the primary line takes the panel's text colour: follow theme changes
@@ -2401,21 +2402,51 @@ CinnamonNetworkApplet.prototype = {
             return;
 
         for (let kind in this._linkIcons) {
+            let group = this._linkIcons[kind];
             let want = (kind === NMConnectionCategory.VPN) ? Math.round(size * VPN_ICON_SCALE) : size;
-            let icon = this._linkIcons[kind].icon;
-            if (icon.icon_size !== want)
-                icon.set_icon_size(want);
+            if (group.icon.icon_size !== want)
+                group.icon.set_icon_size(want);
+
+            if (group.holder)
+                this._fitPanelIcon(group, want - size);
         }
+    },
+
+    /* Lay the bigger tunnel icon out at the width the other icons take, and
+       draw it centred over that, overflowing into its own empty margins.  Laid
+       out at its full width those margins widened the gaps on both sides: 8px
+       to the Wi-Fi bars against 6px between the other icons, and 14px to the
+       next applet against 12px after a lone Wi-Fi or wired icon (measured in
+       the realm).  A width on the St.Icon itself squeezes the glyph instead,
+       so the icon sits in a fixed-layout holder that is given the width. */
+    _fitPanelIcon: function(group, extra) {
+        let natural = group.icon.get_preferred_width(-1)[1];
+        if (natural <= 0)
+            return;   // not styled yet: the next redraw fits it
+
+        let style = 'width: ' + Math.round(natural - extra) + 'px;';
+        if (group.holder.get_style() !== style)
+            group.holder.set_style(style);
+
+        let x = -Math.round(extra / 2);
+        if (group.icon.x !== x || group.icon.y !== 0)
+            group.icon.set_position(x, 0);
     },
 
     /* A panel icon for one kind of link, with the count to its right.  Kept
        before the TextIconApplet label, so the panel reads
        [fallback][wired][Wi-Fi][VPN][label]. */
-    _makeLinkIcon: function() {
+    _makeLinkIcon: function(kind) {
         let icon = new St.Icon({ icon_type: St.IconType.SYMBOLIC,
                                  style_class: 'system-status-icon' });
+        // the bigger tunnel icon sits in a holder (see _fitPanelIcon())
+        let holder = null;
+        if (kind === NMConnectionCategory.VPN) {
+            holder = new St.Widget({ layout_manager: new Clutter.FixedLayout() });
+            holder.add_child(icon);
+        }
         // holds the primary line (see _setPrimaryLine())
-        let iconBin = new St.Bin({ child: icon, style: primaryLineStyle(null) });
+        let iconBin = new St.Bin({ child: holder || icon, style: primaryLineStyle(null) });
         let count = new St.Label({ style_class: 'applet-label' });
         let box = new St.BoxLayout({ style: 'spacing: 2px;' });
         box.add(iconBin, { y_align: St.Align.MIDDLE, y_fill: false });
@@ -2429,7 +2460,7 @@ CinnamonNetworkApplet.prototype = {
         } catch (e) {
             // appended after the label instead; still usable
         }
-        return { box: box, iconBin: iconBin, icon: icon, count: count, primaryLine: false };
+        return { box: box, iconBin: iconBin, holder: holder, icon: icon, count: count, primaryLine: false };
     },
 
     /* The panel's text colour as CSS, for the primary line: St has no
