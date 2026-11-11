@@ -2636,11 +2636,33 @@ CinnamonNetworkApplet.prototype = {
     },
 
     on_applet_clicked: function(event) {
+        if (!this.menu.isOpen)
+            this._forgetMenuSizes();
         this.menu.toggle();
     },
 
     _openMenu: function () {
+        if (!this.menu.isOpen)
+            this._forgetMenuSizes();
         this.menu.toggle();
+    },
+
+    /* Cinnamon's popup menu lines up its rows' columns and caches each row's
+       size, but setColumnWidths() only stores the new widths: nothing tells
+       Clutter to measure the rows again (popupMenu.js does that only for
+       themes with a background image).  Rows that did not change since kept
+       their size from an earlier, wider menu.  On the laptop a second Wi-Fi
+       adapter's 61-character name left the menu 764px wide after the adapter
+       was unplugged, where 487px was enough (2026-11-11).  Forget every
+       cached size just before the menu opens, so it is sized and placed from
+       fresh measurements. */
+    _forgetMenuSizes: function() {
+        let walk = actor => {
+            actor.queue_relayout();
+            for (let child of actor.get_children())
+                walk(child);
+        };
+        walk(this.menu.box);
     },
 
     _ensureSource: function() {
