@@ -130,6 +130,25 @@ function linkPreference(a) {
     return [addressed ? 2 : 3, 0];
 }
 
+/* The kinds of link that get a panel icon of their own, in panel order. */
+const LINK_ICON_KINDS = [ NMConnectionCategory.WIRED,
+                          NMConnectionCategory.WIRELESS,
+                          NMConnectionCategory.VPN ];
+
+/* The tooltip's name for a kind of link, from strings the menu already uses. */
+function linkKindTitle(kind) {
+    if (kind === NMConnectionCategory.WIRED)
+        return _("Wired");
+    if (kind === NMConnectionCategory.WIRELESS)
+        return _("Wireless");
+    return _("VPN");
+}
+
+/* An active connection's name as the menu shows it, else libnm's id. */
+function activeConnectionName(a) {
+    return (a.connection && a.connection._name) ? a.connection._name : a.get_id();
+}
+
 /* The link NM prefers among `links` (see linkPreference()).  Ties keep NM's
    order, which lists the newest connection first. */
 function preferredLink(links) {
@@ -2099,22 +2118,15 @@ CinnamonNetworkApplet.prototype = {
             this._currentIconName = undefined;
             this._setIcon('xsi-network-offline');
 
-            /* Dedicated tunnel indicator, sitting beside the link glyph rather
-               than on top of it, so "encrypted AP" and "VPN up" never share a
-               symbol. Hidden unless a tunnel is actually up. */
-            this._vpnIcon = new St.Icon({ icon_name: 'xsi-network-vpn',
-                                          icon_type: St.IconType.SYMBOLIC,
-                                          style_class: 'system-status-icon' });
-            this._vpnIconBin = new St.Bin();
-            this._vpnIconBin.set_child(this._vpnIcon);
-            this.actor.add(this._vpnIconBin, { y_align: St.Align.MIDDLE, y_fill: false });
-            try {
-                /* Prefer [link][vpn][count]; if the ordering call is
-                   unavailable the appended position is still fine. */
-                this.actor.set_child_below_sibling(this._vpnIconBin, this._layoutBin);
-            } catch (e) {
-            }
-            this._vpnIconBin.hide();
+            /* One panel icon per kind of link, always in LINK_ICON_KINDS
+               order, each shown only while a connection of that kind is up
+               (see _drawLinkIcons()).  The applet's own icon stays as the
+               fallback for when none of them is.  A tunnel has an icon of
+               its own rather than a padlock on the bars: the padlock means
+               "this Wi-Fi network is encrypted", as it does in the menu. */
+            this._linkIcons = { };
+            for (let kind of LINK_ICON_KINDS)
+                this._linkIcons[kind] = this._makeLinkIcon();
 
             this.settings = new Settings.AppletSettings(this, metadata.uuid, this.instance_id);
             this.settings.bind("keyOpen", "keyOpen", this._setKeybinding);
@@ -2278,14 +2290,129 @@ CinnamonNetworkApplet.prototype = {
         return this.panel.getPanelZoneIconSize(this.locationLabel, St.IconType.SYMBOLIC);
     },
 
-    /* Size our own panel icons like the link icon.  An St.Icon with no size
-       of its own takes the theme's .applet-icon size (22px in Mint-Y), while
-       the panel draws symbolic icons at its zone size (16px by default), so
-       the tunnel icon came out visibly larger than the link icon beside it. */
+    /* Size our own panel icons like the applet's own icon.  An St.Icon with
+       no size of its own takes the theme's .applet-icon size (22px in
+       Mint-Y), while the panel draws symbolic icons at its zone size (16px
+       by default), so the tunnel icon came out visibly larger than the link
+       icon beside it. */
     _sizePanelIcons: function() {
         let size = this._panelIconSize();
-        if (size && this._vpnIcon && this._vpnIcon.icon_size !== size)
-            this._vpnIcon.set_icon_size(size);
+        if (!size || !this._linkIcons)
+            return;
+
+        for (let kind in this._linkIcons) {
+            let icon = this._linkIcons[kind].icon;
+            if (icon.icon_size !== size)
+                icon.set_icon_size(size);
+        }
+    },
+
+    /* A panel icon for one kind of link, with the count to its right.  Kept
+       before the TextIconApplet label, so the panel reads
+       [fallback][wired][Wi-Fi][VPN][label]. */
+    _makeLinkIcon: function() {
+        let icon = new St.Icon({ icon_type: St.IconType.SYMBOLIC,
+                                 style_class: 'system-status-icon' });
+        let count = new St.Label({ style_class: 'applet-label' });
+        let box = new St.BoxLayout({ style: 'spacing: 2px;' });
+        box.add(icon, { y_align: St.Align.MIDDLE, y_fill: false });
+        box.add(count, { y_align: St.Align.MIDDLE, y_fill: false });
+        count.hide();
+        box.hide();
+
+        this.actor.add(box, { y_align: St.Align.MIDDLE, y_fill: false });
+        try {
+            this.actor.set_child_below_sibling(box, this._layoutBin);
+        } catch (e) {
+            // appended after the label instead; still usable
+        }
+        return { box: box, icon: icon, count: count };
+    },
+
+    _activeAccessPoint: function(activeConnection) {
+        let dev = activeConnection._primaryDevice;
+        return (dev && dev.device && dev.device.active_access_point) || null;
+    },
+
+    /* The wired, Wi-Fi and VPN icons and the tooltip.  Only connections NM
+       has ACTIVATED count; a kind with none up but one activating shows its
+       "acquiring" icon, with no count.  With two links of one kind up, the
+       icon is drawn from the one NM prefers (see linkPreference()).  Mobile
+       broadband and Bluetooth have no icon of their own: they show through
+       the fallback icon, when none of the three kinds is up.  Returns
+       { shown: number of icons shown, connecting: whether any is acquiring }. */
+    _drawLinkIcons: function() {
+        let lines = [];
+        let shown = 0;
+        let connecting = false;
+        let watchAp = null;
+
+        this._sizePanelIcons();
+
+        for (let kind of LINK_ICON_KINDS) {
+            let group = this._linkIcons[kind];
+            let all = this._activeConnections.filter(a => a._section === kind);
+            let up = all.filter(a => a.state === NM.ActiveConnectionState.ACTIVATED);
+            let acting = all.filter(a => a.state === NM.ActiveConnectionState.ACTIVATING);
+
+            if (up.length == 0 && acting.length == 0) {
+                group.box.hide();
+                continue;
+            }
+
+            // the drawn connection first, then the others in NM's order
+            let best = preferredLink(up);
+            let ordered = best ? [ best ].concat(up.filter(a => a !== best)) : [];
+            let names = ordered.map(a => {
+                let ap = (kind === NMConnectionCategory.WIRELESS) ? this._activeAccessPoint(a) : null;
+                return ap ? ssidToLabel(ap.get_ssid()) + " (" + ap.strength + "%)"
+                          : activeConnectionName(a);
+            });
+            for (let a of acting)
+                names.push(activeConnectionName(a) + " (" + _("connecting...") + ")");
+
+            let iconName;
+            if (kind === NMConnectionCategory.WIRELESS) {
+                let ap = best ? this._activeAccessPoint(best) : null;
+                if (ap) {
+                    iconName = 'xsi-network-wireless-signal-' + signalToIcon(ap.strength) +
+                               apSecuritySuffix(best._primaryDevice, ap);
+                    watchAp = ap;
+                } else {
+                    iconName = best ? 'xsi-network-wireless-connected' : 'xsi-network-wireless-acquiring';
+                }
+            } else if (kind === NMConnectionCategory.WIRED) {
+                iconName = best ? 'xsi-network-wired' : 'xsi-network-wired-acquiring';
+            } else {
+                iconName = best ? 'xsi-network-vpn' : 'xsi-network-vpn-acquiring';
+            }
+            if (!best)
+                connecting = true;
+
+            group.icon.icon_name = iconName;
+            group.count.set_text(up.length > 1 ? String(up.length) : "");
+            group.count.visible = up.length > 1;
+            group.box.show();
+            shown++;
+
+            lines.push(linkKindTitle(kind) + ": " + names.join(", "));
+        }
+
+        this._applet_icon_box.visible = (shown == 0);
+        if (shown)
+            this.set_applet_tooltip(lines.join("\n"));
+
+        /* Keep the drawn bars honest between timer ticks. */
+        this._watchSignal(watchAp);
+
+        return { shown: shown, connecting: connecting };
+    },
+
+    _hideLinkIcons: function() {
+        for (let kind in this._linkIcons)
+            this._linkIcons[kind].box.hide();
+        this._applet_icon_box.show();
+        this._watchSignal(null);
     },
 
     on_panel_icon_size_changed: function(size) {
@@ -2747,6 +2874,7 @@ CinnamonNetworkApplet.prototype = {
 
         if (!this._client.networking_enabled) {
             this._setIcon('xsi-network-offline');
+            this._hideLinkIcons();
             this._hideDevices();
             this._statusItem.label.text = _("Networking is disabled");
             this._statusSection.actor.show();
@@ -2878,71 +3006,13 @@ CinnamonNetworkApplet.prototype = {
                     break;
                 }
             }
-            /* Tunnels get their own indicator beside the link glyph, never a
-               padlock composited onto it: in the menu the "-secure" wifi
-               icons already mean "this access point is encrypted", and one
-               glyph must not carry two meanings. */
-            let tunnels = this._activeConnections.filter(a => a._section === NMConnectionCategory.VPN);
-            let upTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATED);
-            let actingTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATING);
-
-            /* The physical link to draw: the wireless, wired or WWAN
-               connection NM prefers (see linkPreference()).  Ranking only on
-               "has a gateway" tied the cable with the Wi-Fi under a full
-               tunnel, and NM's newest-first order then drew the Wi-Fi
-               although NM itself preferred the cable. */
-            let physical = preferredLink(this._activeConnections.filter(a =>
-                a._section === NMConnectionCategory.WIRELESS ||
-                a._section === NMConnectionCategory.WIRED ||
-                a._section === NMConnectionCategory.WWAN));
-            this._physicalLink = physical;   // read by Eval probes when testing
-
-            /* A full-tunnel connection owns the default route, so it becomes
-               _mainConnection and the switch above drew the tunnel in place
-               of the link.  Redraw the base from the physical connection so
-               the signal strength stays visible. */
-            if (physical && mc && mc._section === NMConnectionCategory.VPN) {
-                if (physical._section === NMConnectionCategory.WIRELESS) {
-                    let pdev = physical._primaryDevice;
-                    let pap = (pdev && pdev.device) ? pdev.device.active_access_point : null;
-                    if (pap) {
-                        this._setIcon('xsi-network-wireless-signal-' + signalToIcon(pap.strength) + apSecuritySuffix(pdev, pap));
-                        this._setTooltip(_("Wireless connection") + ": " + ssidToLabel(pap.get_ssid()) + " (" + pap.strength + "%)");
-                    }
-                } else if (physical._section === NMConnectionCategory.WIRED) {
-                    this._setIcon('xsi-network-wired');
-                    this._setTooltip(_("Connected to the wired network"));
-                }
-            }
-
-            this._sizePanelIcons();
-            if (actingTunnels.length) {
-                this._vpnIcon.icon_name = 'xsi-network-vpn-acquiring';
-                this._vpnIconBin.show();
-                this.set_applet_tooltip(_("Connecting to the VPN..."));
-            } else if (upTunnels.length) {
-                this._vpnIcon.icon_name = 'xsi-network-vpn';
-                this._vpnIconBin.show();
-
-                let names = upTunnels.map(a => (a.connection && a.connection._name)
-                                               ? a.connection._name : _("VPN"));
-                this.set_applet_tooltip(this._baseTooltip
-                                        ? this._baseTooltip + "  \u00b7  " + names.join(', ')
-                                        : names.join(', '));
-            } else {
-                this._vpnIconBin.hide();
-            }
-
-            /* Panel badge: how many tunnels are up, once there is more than one. */
-            this.set_applet_label(upTunnels.length > 1 ? String(upTunnels.length) : "");
-
-            /* Keep the drawn bars honest between timer ticks. */
-            let watchAp = null;
-            if (physical && physical._section === NMConnectionCategory.WIRELESS) {
-                let pdev = physical._primaryDevice;
-                watchAp = (pdev && pdev.device) ? pdev.device.active_access_point : null;
-            }
-            this._watchSignal(watchAp);
+            /* The switch above drew the applet's own icon from NM's main
+               connection.  It is now only the fallback, for when no wired,
+               Wi-Fi or VPN connection is up: offline, unmanaged, or mobile
+               broadband alone.  Otherwise the per-kind icons replace it. */
+            let drawn = this._drawLinkIcons();
+            if (drawn.connecting)
+                new_delay = FAST_PERIODIC_UPDATE_FREQUENCY_SECONDS;
         }
         catch (e) {
             global.logError(e);
