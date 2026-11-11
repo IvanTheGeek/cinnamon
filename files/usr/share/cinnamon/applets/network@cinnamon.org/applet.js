@@ -1461,7 +1461,35 @@ NMDeviceVPN.prototype = {
         return item;
     },
 
+    /* Building can re-enter: when the menu is open and one of the rows holds
+       the key focus (the pointer is over it), _clearSection() destroys that
+       row, the menu loses its focus and closes, and closing it runs
+       _updateIcon(), which calls back in here.  The inner build then filled
+       the cleared section, the outer build nulled its rows' owners and added
+       its own after them, and every tunnel was listed twice.  So a call made
+       during a build only marks the section stale; it is built again once
+       the running build is done. */
     _createSection: function() {
+        if (this._buildingSection) {
+            this._sectionStale = true;
+            return;
+        }
+
+        this._buildingSection = true;
+        try {
+            // at most a few passes: each one only repeats a request made during the last
+            for (let pass = 0; pass < 3; pass++) {
+                this._sectionStale = false;
+                this._buildSection();
+                if (!this._sectionStale)
+                    break;
+            }
+        } finally {
+            this._buildingSection = false;
+        }
+    },
+
+    _buildSection: function() {
         let active = [];
         let inactive = [];
         for (let obj of this._connections) {
