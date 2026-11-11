@@ -2074,7 +2074,7 @@ CinnamonNetworkApplet.prototype = {
                symbol. Hidden unless a tunnel is actually up. */
             this._vpnIcon = new St.Icon({ icon_name: 'xsi-network-vpn',
                                           icon_type: St.IconType.SYMBOLIC,
-                                          style_class: 'applet-icon' });
+                                          style_class: 'system-status-icon' });
             this._vpnIconBin = new St.Bin();
             this._vpnIconBin.set_child(this._vpnIcon);
             this.actor.add(this._vpnIconBin, { y_align: St.Align.MIDDLE, y_fill: false });
@@ -2237,6 +2237,33 @@ CinnamonNetworkApplet.prototype = {
             this.set_applet_icon_symbolic_name(name);
             this._currentIconName = name;
         }
+    },
+
+    /* The size the panel gives symbolic icons in this applet's zone, which is
+       what IconApplet._setStyle() gives the link icon.  null until the applet
+       is on a panel: appletManager sets this.panel after _init(). */
+    _panelIconSize: function() {
+        if (!this.panel)
+            return null;
+        return this.panel.getPanelZoneIconSize(this.locationLabel, St.IconType.SYMBOLIC);
+    },
+
+    /* Size our own panel icons like the link icon.  An St.Icon with no size
+       of its own takes the theme's .applet-icon size (22px in Mint-Y), while
+       the panel draws symbolic icons at its zone size (16px by default), so
+       the tunnel icon came out visibly larger than the link icon beside it. */
+    _sizePanelIcons: function() {
+        let size = this._panelIconSize();
+        if (size && this._vpnIcon && this._vpnIcon.icon_size !== size)
+            this._vpnIcon.set_icon_size(size);
+    },
+
+    on_panel_icon_size_changed: function(size) {
+        this._sizePanelIcons();
+    },
+
+    on_panel_height_changed: function() {
+        this._sizePanelIcons();
     },
 
     /* Mirror the settings into the module-level ROW_OPTS the menu items read. */
@@ -2868,6 +2895,7 @@ CinnamonNetworkApplet.prototype = {
                 }
             }
 
+            this._sizePanelIcons();
             if (actingTunnels.length) {
                 this._vpnIcon.icon_name = 'xsi-network-vpn-acquiring';
                 this._vpnIconBin.show();
