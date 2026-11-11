@@ -95,6 +95,26 @@ function signalToIcon(value) {
     return 'none';
 }
 
+/* How good a candidate an active connection is for "the physical link":
+   3  it holds the default route (IPv4 or IPv6);
+   2  it has a gateway.  Under a full tunnel no physical link holds the
+      default route, and the tunnel's underlay rides the main table's
+      default route, which belongs to the connection with the gateway;
+   1  it has an address (e.g. a never-default bench cable);
+   0  nothing (e.g. a link brought up with IP disabled).
+   Ties keep NM's order. */
+function linkRank(a) {
+    if (a['default'] || a.default6)
+        return 3;
+
+    let configs = [ a.get_ip4_config(), a.get_ip6_config() ];
+    if (configs.some(c => c && c.get_gateway()))
+        return 2;
+    if (configs.some(c => c && c.get_addresses().length > 0))
+        return 1;
+    return 0;
+}
+
 /* '-secure' when the access point is encrypted, '' when it is open.
    _getApSecurityType() lives on NMDeviceWireless and caches its answer on the
    access point, so pass the device wrapper when there is one. */
@@ -2809,16 +2829,26 @@ CinnamonNetworkApplet.prototype = {
             let upTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATED);
             let actingTunnels = tunnels.filter(a => a.state === NM.ActiveConnectionState.ACTIVATING);
 
+            /* The physical link to draw: the best-ranked wireless, wired or
+               WWAN connection (see linkRank()).  NM lists the newest first, so
+               taking the first one let an address-less test link or a
+               never-default bench cable win under a full tunnel. */
             let physical = null;
+            let physicalRank = -1;
             for (let i = 0; i < this._activeConnections.length; i++) {
                 let a = this._activeConnections[i];
-                if (a._section === NMConnectionCategory.WIRELESS ||
-                    a._section === NMConnectionCategory.WIRED ||
-                    a._section === NMConnectionCategory.WWAN) {
-                    if (!physical || a['default'])
-                        physical = a;
+                if (a._section !== NMConnectionCategory.WIRELESS &&
+                    a._section !== NMConnectionCategory.WIRED &&
+                    a._section !== NMConnectionCategory.WWAN)
+                    continue;
+
+                let rank = linkRank(a);
+                if (rank > physicalRank) {
+                    physical = a;
+                    physicalRank = rank;
                 }
             }
+            this._physicalLink = physical;   // read by Eval probes when testing
 
             /* A full-tunnel connection owns the default route, so it becomes
                _mainConnection and the switch above drew the tunnel in place
