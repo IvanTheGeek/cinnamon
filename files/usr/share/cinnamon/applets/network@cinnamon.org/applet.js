@@ -934,6 +934,41 @@ NMDeviceWired.prototype = {
         this.category = NMConnectionCategory.WIRED;
 
         NMDevice.prototype._init.call(this, client, device, connections);
+
+        if (this.device && this.device.get_speed) {
+            this._speedChangedId = this.device.connect('notify::speed', () => {
+                if (this.statusItem)
+                    this.statusItem.setStatus(this.statusLabel);
+                this.emit('state-changed');
+            });
+        }
+    },
+
+    /* NMDevice.statusLabel is null for both ACTIVATED and DISCONNECTED, so a
+       connected wired row shows the adapter name and nothing else.  Show the
+       negotiated link speed instead. */
+    get statusLabel() {
+        if (this.device.state == NM.DeviceState.ACTIVATED && this.device.get_speed) {
+            let mbits = this.device.get_speed();
+            if (mbits > 0) {
+                if (mbits >= 1000) {
+                    let gb = mbits / 1000;
+                    return ((gb % 1) ? gb.toFixed(1) : String(gb)) + " Gb/s";
+                }
+                return mbits + " Mb/s";
+            }
+        }
+        return Object.getOwnPropertyDescriptor(NMDevice.prototype, 'statusLabel').get.call(this);
+    },
+
+    destroy: function() {
+        if (this._speedChangedId) {
+            // see NMDevice.destroy() for why this goes through GObject.Object
+            GObject.Object.prototype.disconnect.call(this.device, this._speedChangedId);
+            this._speedChangedId = 0;
+        }
+
+        NMDevice.prototype.destroy.call(this);
     },
 
     _createSection: function() {
