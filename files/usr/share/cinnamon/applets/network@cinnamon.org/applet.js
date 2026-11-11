@@ -150,6 +150,15 @@ function primaryLineStyle(color) {
    symbolic icon size instead (Ivan, 2026-11-11). */
 const VPN_ICON_SCALE = 1.25;
 
+/* The padlock is also narrower than the node bar under it, so even laid out
+   at the other icons' width the tunnel icon looked further from the next
+   applet than the other icons are from theirs: 15px from the sound icon at
+   the padlock's height, against 11-14px between the other applets (Ivan's
+   laptop, 2026-11-11).  Its slot loses this fraction of the icon's size on
+   each side, and the icon's group gets the left half back as padding, so
+   the icon moves only towards the next applet. */
+const VPN_ICON_TRIM = 0.15;
+
 /* The kinds of link that get a panel icon of their own, in panel order. */
 const LINK_ICON_KINDS = [ NMConnectionCategory.WIRED,
                           NMConnectionCategory.WIRELESS,
@@ -2401,15 +2410,22 @@ CinnamonNetworkApplet.prototype = {
         if (!size || !this._linkIcons)
             return;
 
+        let horizontal = this._horizontalPanel();
         for (let kind in this._linkIcons) {
             let group = this._linkIcons[kind];
             let want = (kind === NMConnectionCategory.VPN) ? Math.round(size * VPN_ICON_SCALE) : size;
             if (group.icon.icon_size !== want)
                 group.icon.set_icon_size(want);
 
+            // the next applet is beside the icon only in a horizontal panel
             if (group.holder)
-                this._fitPanelIcon(group, want - size);
+                this._fitPanelIcon(group, want - size, horizontal ? Math.round(want * VPN_ICON_TRIM) : 0);
         }
+        this._spaceLinkIcons();
+    },
+
+    _horizontalPanel: function() {
+        return this._orientation === St.Side.TOP || this._orientation === St.Side.BOTTOM;
     },
 
     /* Lay the bigger tunnel icon out at the width the other icons take, and
@@ -2418,19 +2434,39 @@ CinnamonNetworkApplet.prototype = {
        to the Wi-Fi bars against 6px between the other icons, and 14px to the
        next applet against 12px after a lone Wi-Fi or wired icon (measured in
        the realm).  A width on the St.Icon itself squeezes the glyph instead,
-       so the icon sits in a fixed-layout holder that is given the width. */
-    _fitPanelIcon: function(group, extra) {
+       so the icon sits in a fixed-layout holder that is given the width.
+       The holder is then narrowed by trim on each side (see VPN_ICON_TRIM);
+       the group gets that back as left padding (see _spaceLinkIcons()), and
+       the count as its own, so only the gap after the icon shrinks.  The
+       primary line spans the holder, so it stays centred over the glyph. */
+    _fitPanelIcon: function(group, extra, trim) {
         let natural = group.icon.get_preferred_width(-1)[1];
         if (natural <= 0)
             return;   // not styled yet: the next redraw fits it
+        group.trim = trim;
 
-        let style = 'width: ' + Math.round(natural - extra) + 'px;';
+        let style = 'width: ' + Math.round(natural - extra - 2 * trim) + 'px;';
         if (group.holder.get_style() !== style)
             group.holder.set_style(style);
 
-        let x = -Math.round(extra / 2);
+        let x = -Math.round(extra / 2) - trim;
         if (group.icon.x !== x || group.icon.y !== 0)
             group.icon.set_position(x, 0);
+
+        let countStyle = 'padding-left: ' + trim + 'px;';
+        if (group.count.get_style() !== countStyle)
+            group.count.set_style(countStyle);
+    },
+
+    /* The padding before each icon's group: the trim its icon gave up (see
+       _fitPanelIcon()). */
+    _spaceLinkIcons: function() {
+        for (let kind in this._linkIcons) {
+            let group = this._linkIcons[kind];
+            let style = 'spacing: 2px; padding-left: ' + group.trim + 'px;';
+            if (group.box.get_style() !== style)
+                group.box.set_style(style);
+        }
     },
 
     /* A panel icon for one kind of link, with the count to its right.  Kept
@@ -2460,7 +2496,8 @@ CinnamonNetworkApplet.prototype = {
         } catch (e) {
             // appended after the label instead; still usable
         }
-        return { box: box, iconBin: iconBin, holder: holder, icon: icon, count: count, primaryLine: false };
+        return { box: box, iconBin: iconBin, holder: holder, icon: icon, count: count, primaryLine: false,
+                 trim: 0 };
     },
 
     /* The panel's text colour as CSS, for the primary line: St has no
