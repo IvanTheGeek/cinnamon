@@ -108,6 +108,20 @@ function ssidToLabel(ssid) {
     return label;
 }
 
+// How likely an active connection is to be the link under a VPN that holds
+// the default route: 3 it has a default route, 2 a gateway, 1 an address.
+function linkRank(a) {
+    if (a['default'] || a.default6)
+        return 3;
+
+    let configs = [a.get_ip4_config(), a.get_ip6_config()];
+    if (configs.some(c => c && c.get_gateway()))
+        return 2;
+    if (configs.some(c => c && c.get_addresses().length > 0))
+        return 1;
+    return 0;
+}
+
 function NMNetworkMenuItem() {
     this._init.apply(this, arguments);
 }
@@ -2238,6 +2252,26 @@ CinnamonNetworkApplet.prototype = {
         this._mainConnection = activated || activating || default_ip4 || default_ip6 || null;
     },
 
+    // The wireless, wired or WWAN connection with the best linkRank(). NM lists
+    // the newest connection first, so the first one can be a link with no IP.
+    _physicalLink: function() {
+        let best = null;
+        let bestRank = -1;
+        for (let a of this._activeConnections) {
+            if (a._section !== NMConnectionCategory.WIRELESS &&
+                a._section !== NMConnectionCategory.WIRED &&
+                a._section !== NMConnectionCategory.WWAN)
+                continue;
+
+            let rank = linkRank(a);
+            if (rank > bestRank) {
+                best = a;
+                bestRank = rank;
+            }
+        }
+        return best;
+    },
+
     _notifyActivated: function(activeConnection) {
         if (activeConnection.state == NM.ActiveConnectionState.ACTIVATED &&
             activeConnection._primaryDevice && activeConnection._primaryDevice._notification) {
@@ -2495,8 +2529,10 @@ CinnamonNetworkApplet.prototype = {
                 }
                 else if (a._section === NMConnectionCategory.VPN && a.state === NM.ActiveConnectionState.ACTIVATED) {
                     let iconName = 'xsi-network-vpn';
-                    if (mc._section == NMConnectionCategory.WIRELESS) {
-                        const dev = mc._primaryDevice;
+                    // A VPN that holds the default route is mc itself: draw the link under it
+                    const link = mc._section == NMConnectionCategory.VPN ? this._physicalLink() : mc;
+                    if (link && link._section == NMConnectionCategory.WIRELESS) {
+                        const dev = link._primaryDevice;
                         const ap = dev ? dev.device.active_access_point : null;
                         if (ap)
                             iconName = 'xsi-network-wireless-signal-' + signalToIcon(ap.strength) + '-secure';
