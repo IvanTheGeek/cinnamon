@@ -351,12 +351,15 @@ NMNetworkMenuItem.prototype = {
         this._label = new St.Label({ text: title });
         this.addActor(this._label);
         this._icons = new St.BoxLayout({ style_class: 'nm-menu-item-icons' });
-        /* span: -1 makes availWidth run to the item's right edge, and align END
-           then places the box at its natural width flush against that edge, so
-           the bars line up with the switches on the other rows.  Without it a
-           two-column row stops short of a three-column one and leaves a gap to
-           the right of the bars. */
-        this.addActor(this._icons, { align: St.Align.END, span: -1 });
+        /* span: -1 makes availWidth run to the item's right edge, and expand
+           gives the box all of it, so the bars end at that edge, in line with
+           the switches on the other rows, whatever the box's own preferred
+           width says.  The meta text inside takes up the slack (below).
+           Placing the box by its preferred width instead (align END) let a
+           stale width push the bars left: on the laptop the bold active row's
+           box was placed at 235px against a real 243, and the bars sat 8px
+           left of the column, overlapping the text (2026-11-11). */
+        this.addActor(this._icons, { span: -1, expand: true });
 
         /* The band/strength text goes INSIDE the icon box rather than taking a
            column of its own.  PopupBaseMenuItem inserts `spacing` between every
@@ -372,7 +375,9 @@ NMNetworkMenuItem.prototype = {
            instead: a clipped network name is far less harmful than a clipped
            signal reading, and it keeps the bars pinned right. */
         this._labelStrength.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
-        this._icons.add(this._labelStrength, { y_align: St.Align.MIDDLE, y_fill: false });
+        // takes the box's slack and sits at its right end, against the bars
+        this._icons.add(this._labelStrength, { expand: true, x_fill: false, x_align: St.Align.END,
+                                               y_align: St.Align.MIDDLE, y_fill: false });
 
         this._signalIcon = new St.Icon({ icon_name: this._getIcon(),
                                          style_class: 'popup-menu-icon' });
@@ -433,13 +438,11 @@ NMNetworkMenuItem.prototype = {
     },
 
     /* Setting the text is NOT enough.  The icon box caches a preferred width,
-       and it does not get invalidated when the child label's text changes.  So
-       when the meta shrinks -- "2.4\u00b75 GHz \u00b7 100%" -> "2.4\u00b75 GHz \u00b7 99%", which
-       happens on every signal update, ~8/min -- the box keeps its old, wider
-       allocation, St packs the children from the left, and the signal icon ends
-       up short of the right edge every other row lines up on.  This is what
-       makes the list look misaligned a few seconds after the menu is opened and
-       the scan results land.  queue_relayout() drops the cached size. */
+       and it does not get invalidated when the child label's text changes, so
+       the menu's columns would be sized from the old text -- "2.4\u00b75 GHz \u00b7
+       100%" -> "99%" happens on every signal update, ~8/min.  queue_relayout()
+       drops the cached size.  (The bars stay at the right edge either way:
+       the box fills the row; see _init.) */
     _refreshMeta: function() {
         this._labelStrength.set_text(this._metaText());
         this._icons.queue_relayout();
