@@ -130,6 +130,18 @@ function linkPreference(a) {
     return [addressed ? 2 : 3, 0];
 }
 
+/* The underline under a panel icon: a 2px bottom border, matched by 2px of
+   top padding so the icon stays centred like its neighbours; an icon with
+   no underline gets 2px of padding at each end instead, so showing the
+   underline moves nothing.  All four sides get the colour: St paints every
+   side in one colour, so "border-bottom: 2px solid <colour>" alone came out
+   invisible (Cinnamon 6.6.9). */
+function underlineStyle(color) {
+    if (!color)
+        return 'padding-top: 2px; padding-bottom: 2px;';
+    return 'padding-top: 2px; border: 0 solid ' + color + '; border-bottom-width: 2px;';
+}
+
 /* The kinds of link that get a panel icon of their own, in panel order. */
 const LINK_ICON_KINDS = [ NMConnectionCategory.WIRED,
                           NMConnectionCategory.WIRELESS,
@@ -147,6 +159,34 @@ function linkKindTitle(kind) {
 /* An active connection's name as the menu shows it, else libnm's id. */
 function activeConnectionName(a) {
     return (a.connection && a.connection._name) ? a.connection._name : a.get_id();
+}
+
+/* Whether a connection has a default route of its own (0.0.0.0/0 or ::/0) in
+   any routing table.  In WireGuard's default policy-routing mode a full
+   tunnel's default route sits in a table of its own and NM's default flag
+   stays on the link (seen on NM 1.46.0: "0.0.0.0/0 table 51936"), so the flag
+   alone does not tell such a tunnel from a split one. */
+function hasDefaultRoute(a) {
+    for (let c of [ a.get_ip4_config(), a.get_ip6_config() ]) {
+        if (c && c.get_routes().some(r => r.get_prefix() === 0))
+            return true;
+    }
+    return false;
+}
+
+/* The connection that carries the default route: a tunnel that takes all
+   traffic (it holds NM's default, or has a default route of its own), else
+   the connection holding NM's default.  null when none has one. */
+function primaryConnection(activeConnections) {
+    let up = activeConnections.filter(a => a._section &&
+                                           a.state === NM.ActiveConnectionState.ACTIVATED);
+    let tunnels = up.filter(a => a._section === NMConnectionCategory.VPN);
+    let full = tunnels.find(a => a['default'] || a.default6) || tunnels.find(hasDefaultRoute);
+    if (full)
+        return full;
+
+    return up.find(a => a._section !== NMConnectionCategory.VPN &&
+                        (a['default'] || a.default6)) || null;
 }
 
 /* The link NM prefers among `links` (see linkPreference()).  Ties keep NM's
@@ -2127,6 +2167,15 @@ CinnamonNetworkApplet.prototype = {
             this._linkIcons = { };
             for (let kind of LINK_ICON_KINDS)
                 this._linkIcons[kind] = this._makeLinkIcon();
+            this._primaryConnection = null;
+
+            // the underline takes the panel's text colour: follow theme changes
+            this.actor.connect('style-changed', () => {
+                for (let kind in this._linkIcons) {
+                    if (this._linkIcons[kind].underlined)
+                        this._setUnderline(this._linkIcons[kind], true);
+                }
+            });
 
             this.settings = new Settings.AppletSettings(this, metadata.uuid, this.instance_id);
             this.settings.bind("keyOpen", "keyOpen", this._setKeybinding);
@@ -2313,9 +2362,11 @@ CinnamonNetworkApplet.prototype = {
     _makeLinkIcon: function() {
         let icon = new St.Icon({ icon_type: St.IconType.SYMBOLIC,
                                  style_class: 'system-status-icon' });
+        // holds the underline (see _setUnderline())
+        let iconBin = new St.Bin({ child: icon, style: underlineStyle(null) });
         let count = new St.Label({ style_class: 'applet-label' });
         let box = new St.BoxLayout({ style: 'spacing: 2px;' });
-        box.add(icon, { y_align: St.Align.MIDDLE, y_fill: false });
+        box.add(iconBin, { y_align: St.Align.MIDDLE, y_fill: false });
         box.add(count, { y_align: St.Align.MIDDLE, y_fill: false });
         count.hide();
         box.hide();
@@ -2326,7 +2377,25 @@ CinnamonNetworkApplet.prototype = {
         } catch (e) {
             // appended after the label instead; still usable
         }
-        return { box: box, icon: icon, count: count };
+        return { box: box, iconBin: iconBin, icon: icon, count: count, underlined: false };
+    },
+
+    /* The panel's text colour as CSS, for the underline: St has no
+       currentColor.  null while the applet is off the stage, where St would
+       complain about reading a theme node. */
+    _underlineColor: function() {
+        if (!this.actor.get_stage())
+            return null;
+        let c = this.actor.get_theme_node().get_foreground_color();
+        return 'rgba(' + c.red + ',' + c.green + ',' + c.blue + ',' + (c.alpha / 255).toFixed(2) + ')';
+    },
+
+    _setUnderline: function(group, on) {
+        let color = on ? this._underlineColor() : null;
+        let style = underlineStyle(color);
+        if (group.iconBin.get_style() !== style)
+            group.iconBin.set_style(style);
+        group.underlined = !!color;
     },
 
     _activeAccessPoint: function(activeConnection) {
@@ -2397,6 +2466,16 @@ CinnamonNetworkApplet.prototype = {
 
             lines.push(linkKindTitle(kind) + ": " + names.join(", "));
         }
+
+        /* Underline the icon of the connection that carries the default
+           route, once two or more icons are up.  Under a full tunnel that
+           is the VPN icon, so the panel also tells a full tunnel from a
+           split one. */
+        let primary = primaryConnection(this._activeConnections);
+        this._primaryConnection = primary;
+        for (let kind of LINK_ICON_KINDS)
+            this._setUnderline(this._linkIcons[kind],
+                               shown >= 2 && primary !== null && primary._section === kind);
 
         this._applet_icon_box.visible = (shown == 0);
         if (shown)
