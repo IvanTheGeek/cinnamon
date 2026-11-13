@@ -197,15 +197,27 @@ var PopupBaseMenuItem = class PopupBaseMenuItem {
     }
 
     destroy() {
-        // A menu closes when its key focus leaves it. If this item has it (the
-        // pointer rests on it), the box it sits in takes it, and the menu stays.
-        let focus = global.stage.get_key_focus();
-        let parent = this.actor.get_parent();
-        if (focus && parent && this.actor.contains(focus))
-            parent.grab_key_focus();
+        this._keepFocusInMenu(this.actor);
         this._signals.disconnectAllSignals();
         this.actor.destroy();
         this.emit('destroy');
+    }
+
+    // A menu closes when its key focus leaves it. If @actor has the focus (the
+    // pointer rests on this item), give it to the menu, as when the menu opened.
+    _keepFocusInMenu(actor) {
+        let focus = global.stage.get_key_focus();
+        if (!focus || !actor.contains(focus))
+            return;
+        let target = this.actor.get_parent();
+        for (let a = target; a; a = a.get_parent()) {
+            if (a._delegate instanceof PopupMenu) {
+                target = a;
+                break;
+            }
+        }
+        if (target)
+            target.grab_key_focus();
     }
 
     // adds an actor to the menu item; @params can contain %span
@@ -2427,12 +2439,7 @@ var PopupSubMenuMenuItem = class PopupSubMenuMenuItem extends PopupBaseMenuItem 
     }
 
     destroy() {
-        // the same for the submenu's rows, which are not inside this.actor: before
-        // the submenu goes (see PopupBaseMenuItem.destroy)
-        let focus = global.stage.get_key_focus();
-        let parent = this.actor.get_parent();
-        if (focus && parent && this.menu.actor.contains(focus))
-            parent.grab_key_focus();
+        this._keepFocusInMenu(this.menu.actor); // its rows are not inside this.actor
         this.menu.destroy();
         PopupBaseMenuItem.prototype.destroy.call(this);
     }
