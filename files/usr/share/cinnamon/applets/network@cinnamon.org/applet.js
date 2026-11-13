@@ -190,6 +190,7 @@ NMNetworkMenuItem.prototype = {
             };
             this._accessPoints.push(apObj);
         }
+        this._updated(this.bestAP);
     },
 
     destroy: function() {
@@ -1164,16 +1165,6 @@ NMDeviceWireless.prototype = {
             }
         }
 
-        if (this.device.active_access_point) {
-            let networkPos = this._findNetwork(this.device.active_access_point);
-
-            if (networkPos == -1) // the connected access point is invisible
-                this._activeNetwork = null;
-            else
-                this._activeNetwork = this._networks[networkPos];
-        } else {
-            this._activeNetwork = null;
-        }
         this._networks.sort(this._networkSortFunction);
 
         this._apChangedId = device.connect('notify::active-access-point', Lang.bind(this, this._activeApChanged));
@@ -1184,6 +1175,8 @@ NMDeviceWireless.prototype = {
     },
 
     destroy: function() {
+        this._destroyed = true;
+
         if (this._apChangedId) {
             // see above for this HACK
             GObject.Object.prototype.disconnect.call(this.device, this._apChangedId);
@@ -1265,18 +1258,42 @@ NMDeviceWireless.prototype = {
     },
 
     _activeApChanged: function() {
-        this._activeNetwork = null;
+        // it can change which network the active connection's row stands for
+        this._createSection();
+    },
 
-        let activeAp = this.device.active_access_point;
+    // The network the active connection is on, or null. Without a connection
+    // there is none, whatever access point the device names (NetworkManager
+    // comes back from a crash still associated). With one, it is the active
+    // access point's network, unless no access point is named or it has
+    // another name than the connection's profile (the hidden half of an
+    // Enhanced Open network; the old network during a switch): then it is the
+    // network the profile fits.
+    _getActiveNetwork: function() {
+        if (!this._activeConnection)
+            return null;
 
-        if (activeAp) {
-            let res = this._findExistingNetwork(activeAp);
+        let accessPoint = this.device.active_access_point;
+        let pos = accessPoint ? this._findNetwork(accessPoint) : -1;
+        let apNetwork = pos == -1 ? null : this._networks[pos];
 
-            if (res != null)
-                this._activeNetwork = this._networks[res.network];
-        }
+        let connection = this._activeConnection.connection;
+        if (!connection || (apNetwork && apNetwork.accessPoints.some(ap => ap.connection_valid(connection))))
+            return apNetwork;
 
-        // we don't refresh the view here, setActiveConnection will
+        let networks = this._networks.filter(apObj =>
+            apObj.accessPoints.some(ap => ap.connection_valid(connection)));
+        if (networks.length == 0 ||
+            (apNetwork && apNetwork.ssid.equal(networks[0].ssid)))
+            return apNetwork;
+
+        // one name with two kinds of security is two networks here: stay with
+        // the one the row stands for already
+        let shown = this._activeConnectionItem ? this._activeConnectionItem._apObj : null;
+        if (shown && this._networks.indexOf(shown) != -1 && shown.ssid.equal(networks[0].ssid))
+            return shown;
+
+        return networks[0];
     },
 
     _getApSecurityType: function(accessPoint) {
@@ -1382,9 +1399,14 @@ NMDeviceWireless.prototype = {
         if (apObj.item instanceof PopupMenu.PopupSubMenuMenuItem) {
             for (let item of apObj.item.menu._getMenuItems())
                 item.updateAccessPoints(apObj.accessPoints);
-        } else {
+        } else if (apObj.item) {
             apObj.item.updateAccessPoints(apObj.accessPoints);
         }
+
+        // the active connection's row shows its network's signal as well
+        let activeItem = this._activeConnectionItem;
+        if (activeItem && activeItem._apObj == apObj)
+            activeItem.updateAccessPoints(apObj.accessPoints);
     },
 
     _accessPointAdded: function(device, accessPoint) {
@@ -1407,8 +1429,7 @@ NMDeviceWireless.prototype = {
             }
 
             apObj.accessPoints.push(accessPoint);
-            if (apObj.item)
-                this._updateItemAccessPoints(apObj);
+            this._updateItemAccessPoints(apObj);
         } else {
             apObj = { ssid: accessPoint.get_ssid(),
                       mode: accessPoint.mode,
@@ -1451,36 +1472,16 @@ NMDeviceWireless.prototype = {
             }
 
             // skip networks that should appear earlier
-            let menuPos = this._activeConnectionItem ? 1 : 0;
-            for (pos = 0;
-                 pos < this._networks.length &&
-                 this._networkSortFunction(this._networks[pos], apObj) < 0; ++pos) {
-                if (this._networks[pos] != this._activeNetwork)
-                    menuPos++;
-            }
+            pos = 0;
+            while (pos < this._networks.length &&
+                   this._networkSortFunction(this._networks[pos], apObj) < 0)
+                pos++;
 
             // (re-)add the network
             this._networks.splice(pos, 0, apObj);
-
-            if (this._shouldShowConnectionList()) {
-                this._createNetworkItem(apObj, menuPos);
-                if (menuPos < NUM_VISIBLE_NETWORKS && this._networks.length > NUM_VISIBLE_NETWORKS) {
-                    for (; menuPos < NUM_VISIBLE_NETWORKS; ++pos) {
-                        if (this._networks[pos] != this._activeNetwork)
-                            menuPos++;
-                    }
-                    // pos is past the end when the active network has no row of its own
-                    // (no active connection): then no row was pushed out
-                    let item = pos < this._networks.length ? this._networks[pos].item : null;
-                    if (item && item._apObj) {
-                        item.destroy();
-                        item._apObj.item = null;
-
-                        this._createNetworkItem(item._apObj, NUM_VISIBLE_NETWORKS);
-                    }
-                }
-            }
         }
+
+        this._createSection();
     },
 
     _accessPointRemoved: function(device, accessPoint) {
@@ -1493,41 +1494,12 @@ NMDeviceWireless.prototype = {
         let apObj = this._networks[res.network];
         apObj.accessPoints.splice(res.ap, 1);
 
-        if (apObj.accessPoints.length == 0) {
-            if (this._activeNetwork == apObj)
-                this._activeNetwork = null;
-
-            if (apObj.item)
-                apObj.item.destroy();
-
-            if (this._overflowItem) {
-                if (!apObj.isMore) {
-                    // we removed an item in the main menu, and we have a more submenu
-                    // we need to extract the first item in more and move it to the submenu
-
-                    let item = this._overflowItem.menu.firstMenuItem;
-                    if (item && item._apObj) {
-                        item.destroy();
-                        // clear the cycle, and allow the construction of the new item
-                        item._apObj.item = null;
-
-                        this._createNetworkItem(item._apObj, NUM_VISIBLE_NETWORKS-1);
-                    } else {
-                        log('The more... menu was existing and empty! This should not happen');
-                    }
-                }
-
-                // This can happen if the removed connection is from the overflow
-                // menu, or if we just moved the last connection out from the menu
-                if (this._overflowItem.menu.numMenuItems == 0) {
-                    this._overflowItem.destroy();
-                    this._overflowItem = null;
-                }
-            }
+        if (apObj.accessPoints.length == 0)
             this._networks.splice(res.network, 1);
-
-        } else if (apObj.item)
+        else
             this._updateItemAccessPoints(apObj);
+
+        this._createSection();
     },
 
     _createAPItem: function(connection, accessPointObj, useConnectionName) {
@@ -1546,11 +1518,23 @@ NMDeviceWireless.prototype = {
     },
 
     _clearSection: function() {
-        NMDevice.prototype._clearSection.call(this);
+        // not while the rows are gone over or cleared (see _createSection):
+        // they are gone over once more instead
+        if (this._syncingRows)
+            return;
 
+        // forget the rows first: destroying them can lead back here
+        this._activeConnectionItem = null;
+        this._overflowItem = null;
         for (let i = 0; i < this._networks.length; i++)
             this._networks[i].item = null;
-        this._overflowItem = null;
+
+        this._syncingRows = true;
+        try {
+            NMDevice.prototype._clearSection.call(this);
+        } finally {
+            this._syncingRows = false;
+        }
     },
 
     removeConnection: function(connection) {
@@ -1643,34 +1627,18 @@ NMDeviceWireless.prototype = {
         }
     },
 
-    _createActiveConnectionItem: function() {
-        if (this._activeConnection.connection) {
-            if (!this._activeNetwork) {
-                if (this.device.active_access_point) {
-                    let networkPos = this._findNetwork(this.device.active_access_point);
-                    if (networkPos == -1) // the connected access point is invisible
-                        this._activeNetwork = null;
-                    else
-                        this._activeNetwork = this._networks[networkPos];
-                } else {
-                    this._activeNetwork = null;
-                }
-            }
-
-            if (this._activeNetwork)
-                this._activeConnectionItem = new NMNetworkMenuItem(this._activeNetwork.accessPoints, this._activeNetwork.ssidText, { reactive: false });
-            else
-                this._activeConnectionItem = new PopupMenu.PopupImageMenuItem(this._activeConnection.connection._name, 'xsi-network-wireless-connected', { reactive: false });
+    _createActiveConnectionItem: function(activeNetwork) {
+        if (activeNetwork) {
+            this._activeConnectionItem = new NMNetworkMenuItem(activeNetwork.accessPoints, activeNetwork.ssidText, { reactive: false });
+        } else if (this._activeConnection.connection) {
+            this._activeConnectionItem = new PopupMenu.PopupImageMenuItem(this._activeConnection.connection._name, 'xsi-network-wireless-connected', { reactive: false });
         } else {
-            // We cannot read the connection (due to ACL, or API incompatibility), but we still show signal if we have it
-            if (this._activeNetwork)
-                this._activeConnectionItem = new NMNetworkMenuItem(this._activeNetwork.accessPoints, this._activeNetwork.ssidText,
-                                                                   { reactive: false });
-            else
-                this._activeConnectionItem = new PopupMenu.PopupImageMenuItem(_("Connected (private)"),
-                                                                              'xsi-network-wireless-connected',
-                                                                              { reactive: false });
+            // We cannot read the connection (due to ACL, or API incompatibility)
+            this._activeConnectionItem = new PopupMenu.PopupImageMenuItem(_("Connected (private)"),
+                                                                          'xsi-network-wireless-connected',
+                                                                          { reactive: false });
         }
+        this._activeConnectionItem._apObj = activeNetwork;
         this._activeConnectionItem.setShowDot(true);
         this._activeConnectionItem.actor.add_style_class_name('popup-device-menu-item');
     },
@@ -1711,13 +1679,7 @@ NMDeviceWireless.prototype = {
         return connection;
     },
 
-    _createNetworkItem: function(apObj, position) {
-
-        if(!apObj.accessPoints || apObj.accessPoints.length == 0) {
-            // this should not happen, but I have no idea why it happens
-            return;
-        }
-
+    _createNetworkItem: function(apObj) {
         if(apObj.connections.length > 0) {
             if (apObj.connections.length == 1) {
                 apObj.item = this._createAPItem(apObj.connections[0], apObj, false);
@@ -1743,39 +1705,116 @@ NMDeviceWireless.prototype = {
             }));
         }
         apObj.item._apObj = apObj;
+    },
 
-        if (position < NUM_VISIBLE_NETWORKS) {
-            apObj.isMore = false;
-            this.section.addMenuItem(apObj.item, position);
-        } else {
-            if (!this._overflowItem) {
-                this._overflowItem = new PopupMenu.PopupSubMenuMenuItem(_("More"));
-                this.section.addMenuItem(this._overflowItem);
-            }
-            this._overflowItem.menu.addMenuItem(apObj.item, position - NUM_VISIBLE_NETWORKS);
-            apObj.isMore = true;
+    // Destroying the row that has the key focus (the pointer rests on it)
+    // would close the menu: the section takes the focus first
+    _destroyRow: function(item) {
+        let focus = global.stage.get_key_focus();
+        if (focus && (item.actor.contains(focus) ||
+                      (item.menu && item.menu.actor.contains(focus))))
+            this.section.actor.grab_key_focus();
+        item.destroy();
+    },
+
+    // Brings the rows in line with the networks, the active connection and the
+    // device's state, whether the section is empty or not. Nothing else places
+    // a network's row. While the device has an active connection, its row
+    // comes first, and the network it stands for (_getActiveNetwork) is not
+    // listed again. Every other network has one row, in the order of
+    // _networks: as many as fit, the rest under "More". A row that is in its
+    // place already is kept, so scan results do not rebuild the list under
+    // the pointer.
+    _createSection: function() {
+        // Destroying the row that has the key focus closes the menu, and the
+        // applet then updates its devices from inside that destroy(). Such a
+        // call waits, and the rows are gone over once more afterwards.
+        if (this._syncingRows) {
+            this._syncRowsAgain = true;
+            return;
+        }
+        if (this._destroyed)
+            return;
+
+        this._syncingRows = true;
+        try {
+            this._syncRowsAgain = false;
+            this._syncRows();
+            if (this._syncRowsAgain)
+                this._syncRows();
+        } finally {
+            this._syncingRows = false;
         }
     },
 
-    _createSection: function() {
-        if (!this._shouldShowConnectionList())
-            return;
+    _syncRows: function() {
+        let showList = this._shouldShowConnectionList();
+        let hasActive = showList && this._activeConnection != null;
+        let activeNetwork = hasActive ? this._getActiveNetwork() : null;
+        let listed = showList ? this._networks.filter(apObj => apObj != activeNetwork) : [ ];
+        let numVisible = NUM_VISIBLE_NETWORKS - (hasActive ? 1 : 0);
 
-        if(this._activeConnection) {
-            this._createActiveConnectionItem();
-            this.section.addMenuItem(this._activeConnectionItem);
+        let activeItem = this._activeConnectionItem;
+        if (activeItem && (!hasActive || activeItem._apObj != activeNetwork)) {
+            this._activeConnectionItem = null;
+            activeItem.destroy();
+        }
+        if (hasActive && !this._activeConnectionItem) {
+            this._createActiveConnectionItem(activeNetwork);
+            this.section.addMenuItem(this._activeConnectionItem, 0);
         }
 
-        let activeOffset = this._activeConnectionItem ? 1 : 0;
+        this._placeNetworkItems(this.section, listed.slice(0, numVisible), hasActive ? 1 : 0);
 
-        for(let j = 0; j < this._networks.length; j++) {
-            let apObj = this._networks[j];
-            if (apObj == this._activeNetwork) {
-                activeOffset = 0; // we no longer need to account for this
-                continue;
+        let more = listed.slice(numVisible);
+        if (more.length > 0 && !this._overflowItem) {
+            this._overflowItem = new PopupMenu.PopupSubMenuMenuItem(_("More"));
+            this.section.addMenuItem(this._overflowItem);
+        }
+        if (this._overflowItem) {
+            this._placeNetworkItems(this._overflowItem.menu, more, 0);
+            if (more.length == 0) {
+                let overflowItem = this._overflowItem;
+                this._overflowItem = null;
+                this._destroyRow(overflowItem);
             }
+        }
+    },
 
-            this._createNetworkItem(apObj, j + activeOffset);
+    // From position on, the menu gets exactly the rows of networks, in order
+    _placeNetworkItems: function(menu, networks, position) {
+        // a row stays only if its network still has it and is wanted here
+        let items = menu._getMenuItems();
+        for (let i = position; i < items.length; i++) {
+            let item = items[i];
+            let apObj = item._apObj;
+            if (item == this._overflowItem)
+                continue;
+            if (apObj && apObj.item == item) {
+                if (networks.indexOf(apObj) != -1)
+                    continue;
+                apObj.item = null;
+            }
+            this._destroyRow(item);
+        }
+
+        items = menu._getMenuItems();
+        for (let i = 0; i < networks.length; i++) {
+            let apObj = networks[i];
+            if (apObj.item && items[position + i] == apObj.item)
+                continue;
+
+            // made anew at its place: it has no row yet, or one elsewhere
+            if (apObj.item) {
+                let item = apObj.item;
+                apObj.item = null;
+                if (items.indexOf(item) != -1)
+                    items.splice(items.indexOf(item), 1);
+                this._destroyRow(item);
+            }
+            this._createNetworkItem(apObj);
+            menu.addMenuItem(apObj.item, position + i);
+            items.splice(position + i, 0, apObj.item);
         }
     },
 };
