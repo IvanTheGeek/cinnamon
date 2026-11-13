@@ -1419,7 +1419,9 @@ NMDeviceWireless.prototype = {
 
         let pos = this._findNetwork(accessPoint);
         let apObj;
-        let needsupdate = false;
+        // the saved connections this access point can serve
+        let fitting = this._connections.map(obj => obj.connection).filter(connection =>
+            accessPoint.connection_valid(connection));
 
         if (pos != -1) {
             apObj = this._networks[pos];
@@ -1430,6 +1432,8 @@ NMDeviceWireless.prototype = {
 
             apObj.accessPoints.push(accessPoint);
             this._updateItemAccessPoints(apObj);
+            if (this._updateNetworkConnections(apObj, fitting))
+                this._networks.sort(this._networkSortFunction);
         } else {
             apObj = { ssid: accessPoint.get_ssid(),
                       mode: accessPoint.mode,
@@ -1439,37 +1443,7 @@ NMDeviceWireless.prototype = {
                       accessPoints: [ accessPoint ]
                     };
             apObj.ssidText = ssidToLabel(apObj.ssid);
-            needsupdate = true;
-        }
-
-        // check if this enables new connections for this group
-        for (let i = 0; i < this._connections.length; i++) {
-            let connection = this._connections[i].connection;
-            if (accessPoint.connection_valid(connection) &&
-                apObj.connections.indexOf(connection) == -1) {
-                apObj.connections.push(connection);
-
-                // this potentially changes the order
-                needsupdate = true;
-            }
-        }
-
-        if (needsupdate) {
-            if (pos != -1) {
-                // rebuild, as addConnection() does
-                this._networks.sort(this._networkSortFunction);
-                this._clearSection();
-                this._createSection();
-                return;
-            }
-
-            if (this._networks.length == 0) {
-                // only network in the list
-                this._networks.push(apObj);
-                this._clearSection();
-                this._createSection();
-                return;
-            }
+            this._updateNetworkConnections(apObj, fitting);
 
             // skip networks that should appear earlier
             pos = 0;
@@ -1494,10 +1468,13 @@ NMDeviceWireless.prototype = {
         let apObj = this._networks[res.network];
         apObj.accessPoints.splice(res.ap, 1);
 
-        if (apObj.accessPoints.length == 0)
+        if (apObj.accessPoints.length == 0) {
             this._networks.splice(res.network, 1);
-        else
+        } else {
             this._updateItemAccessPoints(apObj);
+            if (this._updateNetworkConnections(apObj, apObj.connections))
+                this._networks.sort(this._networkSortFunction);
+        }
 
         this._createSection();
     },
@@ -1547,51 +1524,7 @@ NMDeviceWireless.prototype = {
         }
 
         this._connections.splice(pos, 1);
-
-        let anyauto = false, forceupdate = false;
-        for (let i = 0; i < this._networks.length; i++) {
-            let apObj = this._networks[i];
-            let connections = apObj.connections;
-            for (let k = 0; k < connections.length; k++) {
-                if (connections[k]._uuid == connection._uuid) {
-                    // remove the connection from the access point group
-                    connections.splice(k, 1);
-                    anyauto = connections.length == 0;
-
-                    if (anyauto) {
-                        // this potentially changes the sorting order
-                        forceupdate = true;
-                        break;
-                    }
-                    if (apObj.item) {
-                        if (apObj.item instanceof PopupMenu.PopupSubMenuMenuItem) {
-                            let items = apObj.item.menu._getMenuItems();
-                            if (items.length == 2) {
-                                // we need to update the connection list to convert this to a normal item
-                                forceupdate = true;
-                            } else {
-                                for (let j = 0; j < items.length; j++) {
-                                    if (items[j]._connection._uuid == connection._uuid) {
-                                        items[j].destroy();
-                                        break;
-                                    }
-                                }
-                            }
-                        } else {
-                            apObj.item.destroy();
-                            apObj.item = null;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
-        if (forceupdate || anyauto) {
-            this._networks.sort(this._networkSortFunction);
-            this._clearSection();
-            this._createSection();
-        }
+        this._matchConnection(connection);
     },
 
     addConnection: function(connection) {
@@ -1602,29 +1535,58 @@ NMDeviceWireless.prototype = {
             uuid: connection._uuid,
         };
         this._connections.push(obj);
+        this._matchConnection(connection);
+    },
 
-        // find an appropriate access point
-        let forceupdate = false;
+    checkConnection: function(connection) {
+        let known = this._findConnection(connection._uuid) != -1;
+        NMDevice.prototype.checkConnection.call(this, connection);
+
+        // an edited profile can fit other networks, or have another name
+        if (known && this._findConnection(connection._uuid) != -1)
+            this._matchConnection(connection, true);
+    },
+
+    // Matches a saved connection to the networks again, after it was saved,
+    // deleted or edited
+    _matchConnection: function(connection, edited) {
+        let changed = false;
         for (let i = 0; i < this._networks.length; i++) {
             let apObj = this._networks[i];
+            if (this._updateNetworkConnections(apObj, [ connection ]))
+                changed = true;
+            else if (edited && apObj.item instanceof PopupMenu.PopupSubMenuMenuItem &&
+                     apObj.connections.indexOf(connection) != -1)
+                apObj.item = null;      // an entry of its submenu shows the old name
+        }
+        if (changed)
+            this._networks.sort(this._networkSortFunction);
 
-            // Check if connection is valid for any of these access points
-            for (let k = 0; k < apObj.accessPoints.length; k++) {
-                let ap = apObj.accessPoints[k];
-                if (ap.connection_valid(connection)) {
-                    apObj.connections.push(connection);
-                    // this potentially changes the sorting order
-                    forceupdate = true;
-                    break;
-                }
+        this._createSection();
+    },
+
+    // Brings a network's saved connections in line with its access points, for
+    // the connections given: one belongs to the network while it is saved and
+    // fits one of the access points. Returns whether that changed anything; if
+    // so the caller sorts the networks, and the network forgets its row, which
+    // offers the old connections (_createSection() makes a new one).
+    _updateNetworkConnections: function(apObj, connections) {
+        let changed = false;
+        for (let connection of connections.slice()) {
+            let fits = this._findConnection(connection._uuid) != -1 &&
+                       apObj.accessPoints.some(ap => ap.connection_valid(connection));
+            let pos = apObj.connections.indexOf(connection);
+            if (fits && pos == -1) {
+                apObj.connections.push(connection);
+                changed = true;
+            } else if (!fits && pos != -1) {
+                apObj.connections.splice(pos, 1);
+                changed = true;
             }
         }
-
-        if (forceupdate) {
-            this._networks.sort(this._networkSortFunction);
-            this._clearSection();
-            this._createSection();
-        }
+        if (changed)
+            apObj.item = null;
+        return changed;
     },
 
     _createActiveConnectionItem: function(activeNetwork) {
