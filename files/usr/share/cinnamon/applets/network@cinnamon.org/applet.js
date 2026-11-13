@@ -448,8 +448,7 @@ NMDevice.prototype = {
 
         this._activeConnection = activeConnection;
 
-        this._clearSection();
-        this._createSection();
+        this._updateSection();
     },
 
     checkConnection: function(connection) {
@@ -636,6 +635,13 @@ NMDevice.prototype = {
         }
     },
 
+    // After a change of state or of the active connection. A device that can
+    // bring its rows in line without rebuilding them overrides this.
+    _updateSection: function() {
+        this._clearSection();
+        this._createSection();
+    },
+
     _addConnectionItem: function(item, position) {
         if (position < NUM_VISIBLE_NETWORKS) {
             this.section.addMenuItem(item);
@@ -690,8 +696,7 @@ NMDevice.prototype = {
 
         this._updateStatusItem();
 
-        this._clearSection();
-        this._createSection();
+        this._updateSection();
         this.emit('state-changed');
     },
 
@@ -1342,7 +1347,10 @@ NMDeviceWireless.prototype = {
         else if (!oneHasConnection && twoHasConnection)
             return 1;
 
-        return two.accessPoints[0].strength - one.accessPoints[0].strength;
+        // by the strongest access point (the rows are no longer rebuilt often
+        // enough to keep each network's list of them in order)
+        let strongest = apObj => Math.max(...apObj.accessPoints.map(ap => ap.strength));
+        return strongest(two) - strongest(one);
 /**
         let oneHasSecurity = one.security != NMAccessPointSecurity.NONE;
         let twoHasSecurity = two.security != NMAccessPointSecurity.NONE;
@@ -1677,6 +1685,11 @@ NMDeviceWireless.prototype = {
                       (item.menu && item.menu.actor.contains(focus))))
             this.section.actor.grab_key_focus();
         item.destroy();
+    },
+
+    // The rows are brought in line with a change, not rebuilt after it
+    _updateSection: function() {
+        this._createSection();
     },
 
     // Brings the rows in line with the networks, the active connection and the
